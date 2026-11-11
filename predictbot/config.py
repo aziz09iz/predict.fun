@@ -55,6 +55,8 @@ DEFAULTS: dict[str, Any] = {
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
         "startup": True,
+        "daily_summary": True,    # send an automatic daily recap
+        "daily_summary_time": "00:05",  # UTC HH:MM
     },
     "prices": {
         "ws_url": "wss://data-stream.binance.vision/stream",
@@ -183,6 +185,8 @@ SETTABLE_KEYS = [
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
     ("notify.startup", "on|off", "pesan start saat boot"),
+    ("notify.daily_summary", "on|off", "rekap harian otomatis"),
+    ("notify.daily_summary_time", "HH:MM", "jam rekap (UTC)"),
     ("api.real_fill", "on|off", "order fill real (butuh api.key)"),
 ]
 
@@ -194,7 +198,7 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
-    if dotted in ("trading.enabled", "notify.startup", "api.real_fill"):
+    if dotted in ("trading.enabled", "notify.startup", "api.real_fill", "notify.daily_summary"):
         if v.lower() not in _BOOLS:
             return False, None, "Gunakan `on` atau `off`"
         return True, _BOOLS[v.lower()], None
@@ -233,6 +237,15 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
         except ValueError:
             return False, None, "chat_id harus angka"
         return True, val, None
+    if dotted == "notify.daily_summary_time":
+        try:
+            hour, minute = v.split(":")
+            hour, minute = int(hour), int(minute)
+        except (ValueError, AttributeError):
+            return False, None, "Format HH:MM (contoh 00:05)"
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return False, None, "Jam 0-23, menit 0-59"
+        return True, f"{hour:02d}:{minute:02d}", None
     if dotted == "notify.level":
         level = v.lower()
         if level not in ("full", "compact", "settle"):

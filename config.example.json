@@ -17,7 +17,9 @@
   "entry_delay_seconds": 1,
   "notify": {
     "level": "full",
-    "startup": true
+    "startup": true,
+    "daily_summary": true,
+    "daily_summary_time": "00:05"
   },
   "prices": {
     "ws_url": "wss://data-stream.binance.vision/stream"

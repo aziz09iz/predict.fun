@@ -256,23 +256,25 @@ class Database:
             )
             self._conn.commit()
 
-    def stats_since(self, since_iso: str) -> dict[str, Any]:
-        """Settlement stats for trades settled at or after ``since_iso`` (ISO-8601 UTC)."""
+    def stats_since(self, since_iso: str, until_iso: str | None = None) -> dict[str, Any]:
+        """Settlement stats for trades settled in ``[since_iso, until_iso)`` (ISO-8601 UTC)."""
+        until = until_iso or "9999-12-31T00:00:00+00:00"
         with self._lock:
             total = self._conn.execute(
-                "SELECT COUNT(*) c FROM trades WHERE status='SETTLED' AND settled_at >= ?",
-                (since_iso,),
+                "SELECT COUNT(*) c FROM trades WHERE status='SETTLED' "
+                "AND settled_at >= ? AND settled_at < ?",
+                (since_iso, until),
             ).fetchone()["c"]
             if total == 0:
                 return {"total": 0, "wins": 0, "losses": 0, "pushes": 0, "winrate": 0.0, "pnl": 0.0}
             row = self._conn.execute(
                 "SELECT "
-                " SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) wins, "
-                " SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) losses, "
-                " SUM(CASE WHEN outcome='PUSH' THEN 1 ELSE 0 END) pushes, "
-                " SUM(COALESCE(pnl,0)) pnl "
-                "FROM trades WHERE status='SETTLED' AND settled_at >= ?",
-                (since_iso,),
+                "SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) wins, "
+                "SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) losses, "
+                "SUM(CASE WHEN outcome='PUSH' THEN 1 ELSE 0 END) pushes, "
+                "SUM(COALESCE(pnl,0)) pnl "
+                "FROM trades WHERE status='SETTLED' AND settled_at >= ? AND settled_at < ?",
+                (since_iso, until),
             ).fetchone()
         wins, losses, pushes = (row[k] or 0 for k in ("wins", "losses", "pushes"))
         settled = wins + losses + pushes

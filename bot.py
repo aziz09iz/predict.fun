@@ -59,6 +59,7 @@ COMMANDS = [
     {"command": "config", "description": "Setting efektif + asal nilainya"},
     {"command": "mode", "description": "Mode saat ini (paper/live)"},
     {"command": "notify", "description": "full|compact|settle — level notifikasi"},
+    {"command": "summary", "description": "Rekap harian (hari sebelumnya)"},
     {"command": "set", "description": "<kunci> <nilai> — ubah konfigurasi"},
     {"command": "prices", "description": "Harga realtime BTC/ETH/BNB"},
 ]
@@ -74,6 +75,8 @@ CONFIG_ROWS = [
     "telegram.style",
     "notify.level",
     "notify.startup",
+    "notify.daily_summary",
+    "notify.daily_summary_time",
     "api.real_fill",
 ]
 
@@ -254,6 +257,46 @@ class PaperBot:
         ]
         return "\n".join(lines)
 
+    def _day_bounds(self, offset_days: int) -> tuple[str, str, str]:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        day = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=offset_days)
+        return day.isoformat(), (day + datetime.timedelta(days=1)).isoformat(), day.strftime("%Y-%m-%d")
+
+    def _daily_summary_message(self, offset_days: int = -1) -> str:
+        f = self.fmt
+        start_iso, end_iso, label = self._day_bounds(offset_days)
+        s = self.db.stats_since(start_iso, end_iso)
+        winrate_text = f"{s['winrate']:.0f}%"
+        lines = [
+            f"📊 {f.b('Rekap harian')} · {f.b(label)}",
+            f"Trade {s['total']} · Winrate {f.b(winrate_text)}",
+            f"Win {s['wins']} · Loss {s['losses']} · Push {s['pushes']}",
+            f"PnL: {f.b(f.money(s['pnl'], with_sign=True))}",
+            f"Balance: {f.money(self.db.get_balance())}",
+        ]
+        return "\n".join(lines)
+
+    async def _daily_summary_loop(self) -> None:
+        """Fire the daily recap once per day at ``notify.daily_summary_time`` (UTC)."""
+        last_key = None
+        while True:
+            try:
+                if not self.cfg["notify"].get("daily_summary", True):
+                    await asyncio.sleep(60)
+                    continue
+                now = datetime.datetime.now(datetime.timezone.utc)
+                key = (now.year, now.month, now.day)
+                hhmm = str(self.cfg["notify"].get("daily_summary_time", "00:05"))
+                hour_s, minute_s = hhmm.split(":", 1)
+                hour, minute = int(hour_s), int(minute_s)
+                if (self.admin is not None and now.hour == hour and now.minute == minute
+                        and key != last_key):
+                    last_key = key
+                    await self.send_admin(self._daily_summary_message(-1))
+            except Exception as exc:
+                log.exception("daily summary error: %s", exc)
+            await asyncio.sleep(20)
+
     def _positions_message(self) -> str:
         f = self.fmt
         positions = self.engine.open_trades()
@@ -295,7 +338,7 @@ class PaperBot:
         lines = [f"🤖 {f.b('Predict.fun Paper Bot')} — perintah"]
         sections = [
             ("Trading", ["trade", "status", "positions", "sell"]),
-            ("Info", ["account", "history", "config", "mode", "prices"]),
+            ("Info", ["account", "history", "summary", "config", "mode", "prices"]),
             ("Notifikasi", ["notify"]),
             ("Config", ["set"]),
         ]
@@ -388,6 +431,8 @@ class PaperBot:
             await self._handle_mode(chat_id, arg)
         elif cmd == "/notify":
             await self._handle_notify(chat_id, arg)
+        elif cmd == "/summary":
+            await self.tg.send(chat_id, self._daily_summary_message(-1))
         elif cmd == "/set":
             await self._handle_set(chat_id, arg)
         else:
@@ -499,6 +544,7 @@ class PaperBot:
             asyncio.create_task(self.feed.run(), name="price-feed"),
             asyncio.create_task(self.engine.run(), name="engine"),
             asyncio.create_task(self.tg.run_polling(self.handle_update), name="telegram"),
+            asyncio.create_task(self._daily_summary_loop(), name="daily-summary"),
         ]
 
         await self._wait_for_prices()

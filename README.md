@@ -97,6 +97,7 @@ dari environment (menimpa `config.json`).
 |---|---|
 | `/account` | balance, winrate, PnL hari ini |
 | `/history [N]` | riwayat trade (default 20) |
+| `/summary` | rekap harian (hari sebelumnya) |
 | `/config` | setting efektif + asal nilainya |
 | `/mode` | mode saat ini (paper/live) |
 | `/prices` | harga realtime BTC/ETH/BNB |
@@ -124,6 +125,8 @@ entry_delay_seconds    → delay entry setelah open (0..120)
 telegram.style         → HTML | MarkdownV2
 notify.level           → full | compact | settle
 notify.startup         → on|off
+notify.daily_summary   → on|off  (rekap harian otomatis)
+notify.daily_summary_time → HH:MM (UTC, default 00:05)
 api.real_fill          → on|off  (butuh api.key)
 mode                   → paper | live  (live belum tersedia)
 ```
