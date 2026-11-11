@@ -49,7 +49,7 @@ DEFAULTS: dict[str, Any] = {
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
     "payout": {
-        "win_multiplier": 1.8,    # 1.8 == favorite odds: +0.8x on win, -stake on loss
+        "win_multiplier": 1.8,    # fallback odds when a real fill can't be fetched
     },
     "entry_delay_seconds": 1,     # decide direction 1s after market open
     "notify": {
@@ -178,7 +178,7 @@ SETTABLE_KEYS = [
     ("trading.coins", "btc,eth,bnb", "subset coin (pisah koma)"),
     ("trading.stake", "angka", "USDT per trade (> 0)"),
     ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
-    ("payout.win_multiplier", "angka", "odds menang (> 1)"),
+    ("payout.win_multiplier", "angka", "odds fallback saat fill real tak tersedia (> 1)"),
     ("entry_delay_seconds", "angka", "delay entry setelah open (0..120)"),
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
@@ -221,10 +221,12 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
             return False, None, "Delay antara 0 dan 120 detik"
         return True, val, None
     if dotted == "telegram.style":
-        style = v.upper().replace("MARKDOWN", "MARKDOWNV2")
-        if style not in ("HTML", "MARKDOWNV2"):
-            return False, None, "Pilih HTML atau MarkdownV2"
-        return True, style, None
+        s = v.lower()
+        if s == "html":
+            return True, "HTML", None
+        if s in ("markdown", "markdownv2"):
+            return True, "MarkdownV2", None
+        return False, None, "Pilih HTML atau MarkdownV2"
     if dotted == "telegram.chat_id":
         try:
             val = int(v)
