@@ -88,7 +88,7 @@ class Engine:
     async def _tick(self, now: float) -> None:
         open_ts = mkt.window_open(now)
         close_ts = open_ts + mkt.WINDOW_SECONDS
-        self._capture_and_entry(now, open_ts, close_ts)
+        await self._capture_and_entry(now, open_ts, close_ts)
         await self._settle(now)
         self._prune(open_ts)
 
