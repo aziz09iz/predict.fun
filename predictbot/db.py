@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS trades (
     direction    TEXT,
     stake        REAL NOT NULL,
     odds         REAL NOT NULL,
+    fill_price   REAL,
+    fee_bps      INTEGER,
     status       TEXT NOT NULL DEFAULT 'OPEN',
     outcome      TEXT,
     pnl          REAL,
@@ -73,7 +75,16 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
+            self._migrate_columns()
             self._conn.commit()
+
+    def _migrate_columns(self) -> None:
+        """Add columns that older databases lack (idempotent, literals only)."""
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(trades)")}
+        if "fill_price" not in existing:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN fill_price REAL")
+        if "fee_bps" not in existing:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN fee_bps INTEGER")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -137,12 +148,14 @@ class Database:
         direction: str | None,
         stake: float,
         odds: float,
+        fill_price: float | None = None,
+        fee_bps: int | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO trades(coin, market_slug, open_ts, close_ts, open_price, "
-                "entry_price, direction, stake, odds, status, opened_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)",
+                "entry_price, direction, stake, odds, fill_price, fee_bps, status, opened_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)",
                 (
                     coin,
                     market_slug,
@@ -153,6 +166,8 @@ class Database:
                     direction,
                     stake,
                     odds,
+                    fill_price,
+                    fee_bps,
                     _now_iso(),
                 ),
             )

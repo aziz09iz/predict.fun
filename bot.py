@@ -74,6 +74,7 @@ CONFIG_ROWS = [
     "telegram.style",
     "notify.level",
     "notify.startup",
+    "api.real_fill",
 ]
 
 def _display_value(v: Any) -> str:
@@ -100,7 +101,10 @@ class PaperBot:
         self.db = Database()
         self.fmt = Fmt(cfg["telegram"]["style"])
         self.feed = PriceFeed(cfg["prices"]["ws_url"], ALL_COINS)
-        self.predfun = PredictFun()
+        self.predfun = PredictFun(
+            api_key=cfg["api"].get("key", ""),
+            api_base=cfg["api"].get("base_url", "https://api.predict.fun"),
+        )
         self.engine = Engine(cfg, self.db, self.feed, self.predfun)
         self.tg = Telegram(cfg["telegram"]["token"], cfg["telegram"]["style"])
         self._tasks: list[asyncio.Task] = []
@@ -135,20 +139,30 @@ class PaperBot:
             log.exception("notification error: %s", exc)
 
     # ── message builders ────────────────────────────────────────────────────
+    def _fee_text(self, fee_bps: Any) -> str:
+        if isinstance(fee_bps, (int, float)):
+            return f" · Fee {fee_bps / 100:.2f}%"
+        return ""
+
     def _trade_message(self, t: dict[str, Any], compact: bool = False) -> str:
         f = self.fmt
         label, emoji = direction_tag(t["direction"])
         coin = format_coin(t["coin"])
+        arrow = ARROWS.get(t["direction"], '🎯')
         if compact:
-            return f"{ARROWS.get(t['direction'], '🎯')} {coin} 5m {emoji} {label} · {f.price(t['open_price'])} → {f.price(t['entry_price'])} · {f.money(t['stake'])}"
-        odds_text = f"{t['odds']}x"
+            return f"{arrow} {coin} 5m {emoji} {label} · {f.price(t['open_price'])} → {f.price(t['entry_price'])} · {f.money(t['stake'])}"
         lines = [
-            f"{ARROWS.get(t['direction'], '🎯')} {f.b('ENTRY')} — {coin} 5m {emoji}",
+            f"{arrow} {f.b('ENTRY')} — {coin} 5m {emoji}",
             f"Direction: {f.b(label)}",
             f"Open {f.price(t['open_price'])} → Entry {f.price(t['entry_price'])}",
-            f"Stake {f.money(t['stake'])} · Odds {f.b(odds_text)}",
-            f.link("Buka market", market_url(t["coin"], t["open_ts"])),
+            f"Stake {f.money(t['stake'])}",
         ]
+        fp = t.get("fill_price")
+        if isinstance(fp, (int, float)) and 0 < fp < 1:
+            lines.append(f"Fill {f.b(f'{fp:.4f}')} · Payout {f.b(f'{1 / fp:.2f}x')}{f.esc(self._fee_text(t.get('fee_bps')))}")
+        else:
+            lines.append(f"Odds {f.b(f'{t['odds']}x')} (flat)")
+        lines.append(f.link("Buka market", market_url(t["coin"], t["open_ts"])))
         return "\n".join(lines)
 
     def _settle_message(self, t: dict[str, Any], compact: bool = False) -> str:
@@ -161,10 +175,13 @@ class PaperBot:
         lines = [
             f"{emoji} {f.b(label)} — {coin} 5m {dlabel}",
             f"Open {f.price(t['open_price'])} → Close {f.price(t['close_price'])}",
-            f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}",
-            f"Balance: {f.money(self.db.get_balance())}",
-            f.link("Market", market_url(t["coin"], t["open_ts"])),
         ]
+        fp = t.get("fill_price")
+        if isinstance(fp, (int, float)) and 0 < fp < 1:
+            lines.append(f"Fill {f.b(f'{fp:.4f}')} · Payout {f.b(f'{1 / fp:.2f}x')}")
+        lines.append(f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}")
+        lines.append(f"Balance: {f.money(self.db.get_balance())}")
+        lines.append(f.link("Market", market_url(t["coin"], t["open_ts"])))
         return "\n".join(lines)
 
     def _startup_message(self) -> str:
@@ -197,9 +214,10 @@ class PaperBot:
         close_ts = window_close(now)
         winrate_text = f"{stats['winrate']:.0f}%"
         pnl = balance - self.db.get_initial_balance()
+        fill_mode = "real" if (self.cfg["api"].get("key") and self.cfg["api"].get("real_fill", True)) else "flat"
         lines = [
             f"📊 {f.b('Status')}",
-            f"Mode {f.b(self.cfg['mode'])} · Trading {f.b('ON' if t['enabled'] else 'OFF')}",
+            f"Mode {f.b(self.cfg['mode'])} · Trading {f.b('ON' if t['enabled'] else 'OFF')} · Fill {f.b(fill_mode)}",
             f"Balance {f.money(balance)} · PnL {f.money(pnl, with_sign=True)}",
             f"Win/Loss/Push: {stats['wins']}/{stats['losses']}/{stats['pushes']} · Winrate {f.b(winrate_text)}",
             f"Open: {len(self.engine.open_trades())} · Exposure {f.money(exposure)} · Stake {f.money(t['stake'])}",

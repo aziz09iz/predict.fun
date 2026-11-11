@@ -23,7 +23,9 @@
     "ws_url": "wss://data-stream.binance.vision/stream"
   },
   "api": {
-    "key": ""
+    "key": "",
+    "base_url": "https://api.predict.fun",
+    "real_fill": true
   },
   "initial_balance": 100.0
 }

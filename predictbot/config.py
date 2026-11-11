@@ -60,7 +60,9 @@ DEFAULTS: dict[str, Any] = {
         "ws_url": "wss://data-stream.binance.vision/stream",
     },
     "api": {
-        "key": "",                # optional predict.fun x-api-key (unused in paper mode)
+        "key": "",                       # predict.fun x-api-key (optional; enables real fills)
+        "base_url": "https://api.predict.fun",
+        "real_fill": True,               # use live order book fill when a key is present
     },
     "initial_balance": 100.0,
 }
@@ -118,6 +120,10 @@ def load_config_state() -> tuple[dict[str, Any], dict[str, Any]]:
     if chat_id and chat_id.lstrip("-").isdigit():
         cfg["telegram"]["chat_id"] = int(chat_id)
         origins["telegram"]["chat_id"] = ORIGIN_ENV
+    api_key = os.environ.get("PREDICTFUN_API_KEY", "").strip()
+    if api_key:
+        cfg["api"]["key"] = api_key
+        origins["api"]["key"] = ORIGIN_ENV
 
     return cfg, origins
 
@@ -171,6 +177,7 @@ SETTABLE_KEYS = [
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
     ("notify.startup", "on|off", "pesan start saat boot"),
+    ("api.real_fill", "on|off", "order fill real (butuh api.key)"),
 ]
 
 
@@ -181,7 +188,7 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
-    if dotted == "trading.enabled" or dotted == "notify.startup":
+    if dotted in ("trading.enabled", "notify.startup", "api.real_fill"):
         if v.lower() not in _BOOLS:
             return False, None, "Gunakan `on` atau `off`"
         return True, _BOOLS[v.lower()], None

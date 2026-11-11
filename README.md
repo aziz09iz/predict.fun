@@ -29,11 +29,27 @@ Untuk setiap jendela 5 menit (open = `startPricePublishTime`):
 4. Saat close, settlement persis aturan predict.fun:
    - UP menang bila `endPrice` > `startPrice`, DOWN menang bila sebaliknya, sama persis → push.
 
-### Model PnL paper
+### Model eksekusi & PnL paper
 
-`win_multiplier` (default **1.8**). Menang → `+stake × (multiplier − 1)`, kalah → `−stake`, push → `0`.
+Bot punya **dua mode** untuk menghitung PnL:
+
+**1. Real fill (dengan `api.key`)** — order di-fill seperti real:
+- Ambil **best bid/ask** live via `GET /v1/markets/{id}/quote`.
+- Beli UP (Yes) di `bestAsk.price`; beli DOWN (No) di `1 − bestBid.price`.
+- Fee diambil dari `feeRateBps` market.
+- Menang → `+stake × (1/fill − 1)`, kalah → `−stake`, push → `0`.
+
+**2. Flat (tanpa `api.key`)** — fallback:
+- `win_multiplier` (default **1.8**). Menang → `+stake × (multiplier − 1)`, kalah → `−stake`.
 
 > `win_multiplier` ≈ `1 / probabilitas`. 2.0 = fair 50/50; 1.8 ≈ masuk ke sisi favorit.
+
+### Mendapatkan API key (untuk real fill)
+
+1. Buka **Developers → API** di account predict.fun (https://developers.predict.fun).
+2. Buat **API key**.
+3. Isi di `config.json` (`api.key`) atau env `PREDICTFUN_API_KEY`.
+4. Nonaktif-fallback: `api.real_fill` (default `true`).
 
 ## Instalasi & menjalankan (lokal)
 
@@ -92,6 +108,7 @@ entry_delay_seconds    → delay entry setelah open (0..120)
 telegram.style         → HTML | MarkdownV2
 notify.level           → full | compact | settle
 notify.startup         → on|off
+api.real_fill          → on|off  (butuh api.key)
 mode                   → paper | live  (live belum tersedia)
 ```
 
