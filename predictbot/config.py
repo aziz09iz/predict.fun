@@ -39,7 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "telegram": {
         "token": "",
         "chat_id": None,          # admin chat id (settable via /start when empty)
-        "style": "HTML",          # "HTML" or "MarkdownV2"
+        "style": "HTML",          # "HTML" (default) | "MarkdownV2"
     },
     "mode": "paper",              # "paper" (simulated). "live" is not implemented.
     "trading": {

@@ -2,7 +2,8 @@
   "telegram": {
     "token": "PASTE_YOUR_BOT_TOKEN_HERE",
     "chat_id": null,
-    "style": "HTML"
+    "style": "HTML",
+    "_note_style": "options: HTML | MarkdownV2"
   },
   "mode": "paper",
   "trading": {
