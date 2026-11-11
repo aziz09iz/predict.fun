@@ -240,6 +240,31 @@ class PredictFun:
             fee_bps = int(det["fee_rate_bps"])
         return {"fill_up": fill_up, "fill_down": fill_down, "fee_bps": fee_bps, "source": "api"}
 
+    async def exit_for(self, coin: str, open_ts: int, direction: str) -> Optional[dict]:
+        """Best price to SELL existing ``direction`` shares right now (exit fill).
+
+        UP holds Yes shares -> sell at the Yes bid (``bestBid``).
+        DOWN holds No shares -> sell at the No bid (``1 - bestAsk``).
+        Returns ``{exit_price, source}`` or ``None`` when no quote is available.
+        """
+        market_id = await self._market_id(coin, open_ts)
+        if not market_id:
+            return None
+        q = await self.market_quote(market_id)
+        if not q:
+            return None
+        bid = q.get("best_bid")
+        ask = q.get("best_ask")
+        if direction == "UP":
+            price = bid
+        elif direction == "DOWN":
+            price = round(1.0 - float(ask), 6) if isinstance(ask, (int, float)) else None
+        else:
+            return None
+        if not isinstance(price, (int, float)) or not (0.0 < price < 1.0):
+            return None
+        return {"exit_price": float(price), "source": "api"}
+
     async def aclose(self) -> None:
         await self._client.aclose()
         if self._api_client is not None:

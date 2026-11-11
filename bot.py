@@ -74,6 +74,7 @@ CONFIG_ROWS = [
     "entry_delay_seconds",
     "entry_delay_max_seconds",
     "entry_max_price",
+    "exit_on_reversal",
     "telegram.style",
     "notify.level",
     "notify.startup",
@@ -141,6 +142,9 @@ class PaperBot:
                 if payload.get("source") == "manual":
                     return  # /sell replies directly
                 await self.send_admin(self._settle_message(payload, compact=compact))
+            elif event_type == "exit":
+                # Early reversal exit is a closing event — show it at every level.
+                await self.send_admin(self._exit_message(payload, compact=compact))
         except Exception as exc:
             log.exception("notification error: %s", exc)
 
@@ -186,6 +190,28 @@ class PaperBot:
         if isinstance(fp, (int, float)) and 0 < fp < 1:
             shares = float(t["stake"]) / float(fp)
             lines.append(f"🎟 {f.b(f'{shares:.4f}')} shares @ {f.b(f'{fp:.2%}')}")
+        lines.append(f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}")
+        lines.append(f"Balance: {f.money(self.db.get_balance())}")
+        lines.append(f.link("Market", market_url(t["coin"], t["open_ts"])))
+        return "\n".join(lines)
+
+    def _exit_message(self, t: dict[str, Any], compact: bool = False) -> str:
+        f = self.fmt
+        coin = format_coin(t["coin"])
+        dlabel, demoji = direction_tag(t["direction"])
+        if compact:
+            return f"🚪 {coin} 5m {dlabel} EXIT {f.money(t['pnl'], with_sign=True)} · bal {f.money(self.db.get_balance())}"
+        shares = float(t.get("shares") or 0.0)
+        fp = t.get("fill_price")
+        xp = t.get("exit_price")
+        lines = [
+            f"🚪 {f.b('EXIT')} — {coin} 5m {dlabel} {demoji}",
+            f"Open {f.price(t['open_price'])} → Exit {f.price(t['close_price'])}",
+        ]
+        if isinstance(fp, (int, float)) and 0 < fp < 1 and isinstance(xp, (int, float)):
+            lines.append(
+                f"🎟 {f.b(f'{shares:.4f}')} shares · beli {f.b(f'{fp:.2%}')} → jual {f.b(f'{xp:.2%}')}"
+            )
         lines.append(f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}")
         lines.append(f"Balance: {f.money(self.db.get_balance())}")
         lines.append(f.link("Market", market_url(t["coin"], t["open_ts"])))

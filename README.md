@@ -36,6 +36,14 @@ berharap harga turun ke bawah limit. Kalau sampai batas waktu masih di atas limi
 **di-skip** (seperti limit order yang tidak ter-fill). Set `entry_max_price` = `1.0` untuk
 menonaktifkan limit ini.
 
+**Exit saat reversal** (`exit_on_reversal`, default `on`): setelah entry, bot memantau harga
+live. Jika harga **balik melewati open price** melawan posisi (UP tapi harga turun ke bawah
+open, atau DOWN tapi harga naik ke atas open), tesis entry dianggap batal — bot **menjual
+share di harga pasar saat itu** (bukan tunggu resolusi biner), merealisasi PnL, lalu menunggu
+round berikutnya. PnL exit = `shares × exit_price − stake`, dengan `exit_price` diambil dari
+sisi jual order book (UP → `bestBid`, DOWN → `1 − bestAsk`). Matikan lewat
+`/set exit_on_reversal off`.
+
 ### Model eksekusi & PnL paper ("like a real")
 
 PnL dihitung **100% dari order fill real** — tidak ada odds flat/fallback.
@@ -130,6 +138,7 @@ trading.min_balance    → saldo minimum (>= 0)
 entry_delay_seconds    → delay entry setelah open (0..120)
 entry_delay_max_seconds → maks tunggu fill sesuai entry_max_price (0..120)
 entry_max_price        → maks fill price 0..1 (1.0 = nonaktif)
+exit_on_reversal       → on|off  (close posisi saat harga balik melewati open)
 telegram.style         → HTML | MarkdownV2
 notify.level           → full | compact | settle
 notify.startup         → on|off

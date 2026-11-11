@@ -51,6 +51,7 @@ DEFAULTS: dict[str, Any] = {
     "entry_delay_seconds": 1,     # decide direction 1s after market open
     "entry_delay_max_seconds": 10,  # max wait for a fill within the price limit
     "entry_max_price": 0.55,   # max fill (0..1); 1.0 disables the limit
+    "exit_on_reversal": True,  # close early if price crosses back over the open price
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
         "startup": True,
@@ -182,6 +183,7 @@ SETTABLE_KEYS = [
     ("entry_delay_seconds", "angka", "delay entry setelah open (0..120)"),
     ("entry_delay_max_seconds", "angka", "maks tunggu fill sesuai entry_max_price (0..120)"),
     ("entry_max_price", "angka", "maks fill price 0..1 (1.0 = nonaktif)"),
+    ("exit_on_reversal", "on|off", "close posisi saat harga balik melewati open price"),
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
     ("notify.startup", "on|off", "pesan start saat boot"),
@@ -198,7 +200,8 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
-    if dotted in ("trading.enabled", "notify.startup", "api.real_fill", "notify.daily_summary"):
+    if dotted in ("trading.enabled", "notify.startup", "api.real_fill", "notify.daily_summary",
+                  "exit_on_reversal"):
         if v.lower() not in _BOOLS:
             return False, None, "Gunakan `on` atau `off`"
         return True, _BOOLS[v.lower()], None

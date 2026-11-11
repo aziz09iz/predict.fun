@@ -106,6 +106,7 @@ class Engine:
         open_ts = mkt.window_open(now)
         close_ts = open_ts + mkt.WINDOW_SECONDS
         await self._capture_and_entry(now, open_ts, close_ts)
+        await self._monitor_exits(now)
         await self._settle(now)
         self._prune(open_ts)
 
@@ -315,6 +316,79 @@ class Engine:
                 continue
             open_price = trade.get("_pf_start") or float(trade["open_price"])
             self._resolve(trade_id, trade, open_price, end_price, source="binance")
+
+    # ── early exit on reversal ──────────────────────────────────────────────
+    async def _monitor_exits(self, now: float) -> None:
+        """Close open positions early when the price crosses back over the open.
+
+        For an UP position the entry signal was ``price > open``; if the live price
+        later falls back below ``open`` the thesis is invalidated, so we sell the
+        shares at the current market instead of holding to binary resolution.
+        Symmetric for DOWN.  Disabled via ``exit_on_reversal = off``.
+        """
+        if not self.cfg.get("exit_on_reversal", True):
+            return
+        for trade_id, trade in list(self._open.items()):
+            direction = trade.get("direction")
+            if direction not in ("UP", "DOWN"):
+                continue
+            open_price = float(trade.get("open_price") or 0.0)
+            if open_price <= 0:
+                continue
+            coin = trade["coin"]
+            live = self.feed.latest(coin)
+            if live <= 0:
+                continue
+            crossed = (direction == "UP" and live < open_price) or \
+                      (direction == "DOWN" and live > open_price)
+            if not crossed:
+                continue
+            # Throttle exit-quote attempts to once per second per position.
+            if now < trade.get("_exit_at", 0.0):
+                continue
+            trade["_exit_at"] = now + 1.0
+            await self._exit_reversal(trade_id, trade, live)
+
+    async def _exit_reversal(self, trade_id: int, trade: dict[str, Any], live_price: float) -> None:
+        """Sell the position at the current market and realize PnL (reversal stop)."""
+        coin = trade["coin"]
+        direction = trade["direction"]
+        stake = float(trade["stake"])
+        fill_price = trade.get("fill_price")
+        if not (isinstance(fill_price, (int, float)) and 0.0 < fill_price < 1.0):
+            return  # cannot value the shares without a real entry fill
+        shares = stake / float(fill_price)
+        ex = await self.predfun.exit_for(coin, trade["open_ts"], direction)
+        if not ex:
+            log.warning("Reversal exit %s %s: no exit quote; holding", coin.upper(), direction)
+            return
+        exit_price = float(ex["exit_price"])
+        proceeds = shares * exit_price
+        pnl = proceeds - stake
+        outcome = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "PUSH")
+        self.db.exit_trade(trade_id, live_price, outcome, pnl, exit_price)
+        balance = self.db.get_balance() + pnl
+        self.db.set_balance(balance)
+        self.db.record_balance_event(
+            "exit", pnl, balance, trade_id=trade_id,
+            note=f"{coin.upper()} {direction} 5m reversal exit",
+        )
+        self._open.pop(trade_id, None)
+        result = {
+            **trade,
+            "close_price": live_price,
+            "exit_price": exit_price,
+            "shares": shares,
+            "outcome": outcome,
+            "pnl": pnl,
+            "reason": "reversal",
+            "source": "exit",
+        }
+        log.info(
+            "EXIT %s %s %s reversal live=%.4f exit=%.4f shares=%.4f pnl=%.4f balance=%.2f",
+            coin.upper(), direction, trade["market_slug"], live_price, exit_price, shares, pnl, balance,
+        )
+        self._emit("exit", result)
 
     def sell(self, trade_id: int, price: float | None = None) -> tuple[Optional[dict], Optional[str]]:
         """Manually close an open position now (used by /sell)."""

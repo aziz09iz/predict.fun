@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS trades (
     odds         REAL NOT NULL,
     fill_price   REAL,
     fee_bps      INTEGER,
+    exit_price   REAL,
     status       TEXT NOT NULL DEFAULT 'OPEN',
     outcome      TEXT,
     pnl          REAL,
@@ -85,6 +86,8 @@ class Database:
             self._conn.execute("ALTER TABLE trades ADD COLUMN fill_price REAL")
         if "fee_bps" not in existing:
             self._conn.execute("ALTER TABLE trades ADD COLUMN fee_bps INTEGER")
+        if "exit_price" not in existing:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN exit_price REAL")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -186,6 +189,23 @@ class Database:
                 "UPDATE trades SET close_price = ?, outcome = ?, pnl = ?, status = 'SETTLED', "
                 "settled_at = ? WHERE id = ?",
                 (close_price, outcome, pnl, _now_iso(), trade_id),
+            )
+            self._conn.commit()
+
+    def exit_trade(
+        self,
+        trade_id: int,
+        close_price: float | None,
+        outcome: str,
+        pnl: float,
+        exit_price: float | None,
+    ) -> None:
+        """Close a position early (reversal exit) at a real sell-side fill."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE trades SET close_price = ?, outcome = ?, pnl = ?, exit_price = ?, "
+                "status = 'SETTLED', settled_at = ? WHERE id = ?",
+                (close_price, outcome, pnl, exit_price, _now_iso(), trade_id),
             )
             self._conn.commit()
 
