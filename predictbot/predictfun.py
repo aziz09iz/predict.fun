@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -29,7 +30,13 @@ log = logging.getLogger("predictbot.predictfun")
 
 BASE_URL = "https://predict.fun"
 API_BASE = "https://api.predict.fun"
-USER_AGENT = "Mozilla/5.0 (PredictFun paper bot)"
+# A plain "bot" User-Agent is rejected by Cloudflare (error 1010) on
+# api.predict.fun; a normal desktop-browser signature passes.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 # Basic-tier rate limits (per minute; trading adds a per-second burst).
 DEFAULT_RATE_LIMITS = {
@@ -72,6 +79,9 @@ class PredictFun:
         # Separate client so the secret header never touches the public-scrape path.
         self._api_client: Optional[httpx.AsyncClient] = None
         self._limiter: Optional[RateLimiter] = None
+        # Numeric market IDs are immutable per window and reused by both the
+        # quote and detail calls during a single entry.
+        self._market_ids: dict[tuple[str, int], int] = {}
         if self.api_key:
             self._api_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(timeout),
@@ -109,7 +119,10 @@ class PredictFun:
         if not isinstance(arr, list) or not arr:
             return None
         d = arr[0]
+        raw_id = d.get("marketId")
+        market_id = int(raw_id) if str(raw_id).isdigit() else None
         return {
+            "market_id": market_id,
             "symbol": d.get("priceFeedSymbol"),
             "provider": d.get("priceFeedProvider"),
             "start_price": d.get("startPrice"),
@@ -146,9 +159,31 @@ class PredictFun:
             log.debug("predict.fun API %s failed: %s", path, exc)
             return None
 
-    async def market_quote(self, coin: str, open_ts: int) -> Optional[dict]:
+    async def _market_id(self, coin: str, open_ts: int) -> Optional[int]:
+        """Numeric market id that the authenticated endpoints expect.
+
+        The REST API identifies markets by an int64 ``marketId`` (not the slug),
+        which is embedded in the public market page.  It is immutable per window,
+        so cache it for the entry's quote+detail pair.
+        """
+        cache_key = (coin, open_ts)
+        cached = self._market_ids.get(cache_key)
+        if cached:
+            return cached
+        md = await self.market_data(coin, open_ts)
+        market_id = md.get("market_id") if md else None
+        if isinstance(market_id, int) and market_id > 0:
+            self._market_ids[cache_key] = market_id
+            now = int(time.time())
+            for key in list(self._market_ids):
+                if key[1] < now - 600:
+                    self._market_ids.pop(key, None)
+            return market_id
+        return None
+
+    async def market_quote(self, market_id: int) -> Optional[dict]:
         """Top-of-book for the Yes side; ``{best_bid, best_ask, update_ts}``."""
-        body = await self._api_get(f"/markets/{slug(coin, open_ts)}/quote")
+        body = await self._api_get(f"/markets/{market_id}/quote")
         if not body or not body.get("success"):
             return None
         data = body.get("data") or {}
@@ -163,9 +198,9 @@ class PredictFun:
             "ask_size": (data.get("bestAsk") or {}).get("size"),
         }
 
-    async def market_detail(self, coin: str, open_ts: int) -> Optional[dict]:
+    async def market_detail(self, market_id: int) -> Optional[dict]:
         """Fee + variant data via the authenticated market endpoint."""
-        body = await self._api_get(f"/markets/{slug(coin, open_ts)}")
+        body = await self._api_get(f"/markets/{market_id}")
         if not body or not body.get("success"):
             return None
         data = body.get("data") or {}
@@ -185,7 +220,10 @@ class PredictFun:
         all-in price-per-share to BUY Yes (Up) and ``fill_down`` to BUY No (Down).
         ``None`` means no quote is available and the caller should skip the entry.
         """
-        q = await self.market_quote(coin, open_ts)
+        market_id = await self._market_id(coin, open_ts)
+        if not market_id:
+            return None
+        q = await self.market_quote(market_id)
         if not q:
             return None
         bid = q.get("best_bid")
@@ -197,7 +235,7 @@ class PredictFun:
         if not (0.0 < fill_up < 1.0) or not (0.0 < fill_down < 1.0):
             return None
         fee_bps = None
-        det = await self.market_detail(coin, open_ts)
+        det = await self.market_detail(market_id)
         if det and isinstance(det.get("fee_rate_bps"), (int, float)):
             fee_bps = int(det["fee_rate_bps"])
         return {"fill_up": fill_up, "fill_down": fill_down, "fee_bps": fee_bps, "source": "api"}

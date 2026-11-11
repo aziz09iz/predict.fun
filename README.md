@@ -180,6 +180,11 @@ Update kode di server: `cd /opt/predictfun && git pull && sudo systemctl restart
   dipakai predict.fun), dengan fallback otomatis antar endpoint.
 - **Slug market**: `<coin>-updown-5m-<open_ts>` (waktu **buka**, bukan tutup), contoh
   `btc-updown-5m-1794397200`. Tautan deep-link disertakan di tiap notifikasi.
+- **API pakai numeric `marketId`**, bukan slug: id diambil dari `marketData` di
+  halaman publik (`marketId`), lalu dipakai di `/v1/markets/{id}/quote` dan
+  `/v1/markets/{id}`.
+- **User-Agent browser**: `api.predict.fun` di belakang Cloudflare (error 1010)
+  memblokir User-Agent bot, jadi client memakai signature browser desktop.
 - **Settlement**: menunggu `endPrice` terbit sampai `SETTLE_GRACE` (90s); jika belum
   ada (mis. CDN lambat), fallback ke Binance mid saat close.
 - **Restart aman**: posisi OPEN dimuat ulang; yang sudah lewat grace ditandai `UNRESOLVED`.
