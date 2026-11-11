@@ -104,6 +104,7 @@ class PaperBot:
         self.predfun = PredictFun(
             api_key=cfg["api"].get("key", ""),
             api_base=cfg["api"].get("base_url", "https://api.predict.fun"),
+            rate_limits=cfg["api"].get("rate_limits"),
         )
         self.engine = Engine(cfg, self.db, self.feed, self.predfun)
         self.tg = Telegram(cfg["telegram"]["token"], cfg["telegram"]["style"])

@@ -23,6 +23,7 @@ from typing import Optional
 import httpx
 
 from .market import slug
+from .rate_limit import RateLimiter
 
 log = logging.getLogger("predictbot.predictfun")
 
@@ -30,10 +31,36 @@ BASE_URL = "https://predict.fun"
 API_BASE = "https://api.predict.fun"
 USER_AGENT = "Mozilla/5.0 (PredictFun paper bot)"
 
+# Basic-tier rate limits (per minute; trading adds a per-second burst).
+DEFAULT_RATE_LIMITS = {
+    "general": 250,
+    "trading": 500,
+    "search": 120,
+    "trading_per_second": 40,
+}
+
+
+def _build_rules(limits: dict) -> dict:
+    rules: dict = {}
+    general = limits.get("general")
+    if isinstance(general, (int, float)) and general > 0:
+        rules["general"] = [(int(general), 60.0)]
+    trading = limits.get("trading")
+    if isinstance(trading, (int, float)) and trading > 0:
+        trading_rules = [(int(trading), 60.0)]
+        burst = limits.get("trading_per_second")
+        if isinstance(burst, (int, float)) and burst > 0:
+            trading_rules.append((int(burst), 1.0))
+        rules["trading"] = trading_rules
+    search = limits.get("search")
+    if isinstance(search, (int, float)) and search > 0:
+        rules["search"] = [(int(search), 60.0)]
+    return rules
+
 
 class PredictFun:
     def __init__(self, base: str = BASE_URL, api_key: str = "", api_base: str = API_BASE,
-                 timeout: float = 15.0):
+                 rate_limits: Optional[dict] = None, timeout: float = 15.0):
         self.base = base.rstrip("/")
         self.api_key = (api_key or "").strip()
         self.api_base = api_base.rstrip("/")
@@ -44,12 +71,14 @@ class PredictFun:
         )
         # Separate client so the secret header never touches the public-scrape path.
         self._api_client: Optional[httpx.AsyncClient] = None
+        self._limiter: Optional[RateLimiter] = None
         if self.api_key:
             self._api_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(timeout),
                 follow_redirects=True,
                 headers={"x-api-key": self.api_key, "User-Agent": USER_AGENT},
             )
+            self._limiter = RateLimiter(_build_rules(rate_limits or DEFAULT_RATE_LIMITS))
 
     # ── public (no key) ─────────────────────────────────────────────────────
     async def market_data(self, coin: str, open_ts: int) -> Optional[dict]:
@@ -91,15 +120,28 @@ class PredictFun:
         }
 
     # ── authenticated REST (x-api-key) ──────────────────────────────────────
-    async def _api_get(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
+    async def _api_get(self, path: str, params: Optional[dict] = None,
+                       category: str = "general") -> Optional[dict]:
         if self._api_client is None:
             return None
+        if self._limiter is not None:
+            await self._limiter.acquire(category)
         url = f"{self.api_base}/v1{path}"
         try:
             resp = await self._api_client.get(url, params=params)
             resp.raise_for_status()
             body = resp.json()
             return body if isinstance(body, dict) else None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                retry_after = exc.response.headers.get("Retry-After")
+                log.warning(
+                    "predict.fun API rate-limited (429) on %s%s; falling back to flat odds",
+                    path, f" (retry-after={retry_after}s)" if retry_after else "",
+                )
+            else:
+                log.debug("predict.fun API %s failed: %s", path, exc)
+            return None
         except Exception as exc:
             log.debug("predict.fun API %s failed: %s", path, exc)
             return None

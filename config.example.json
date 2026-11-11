@@ -25,7 +25,13 @@
   "api": {
     "key": "",
     "base_url": "https://api.predict.fun",
-    "real_fill": true
+    "real_fill": true,
+    "rate_limits": {
+      "general": 250,
+      "trading": 500,
+      "search": 120,
+      "trading_per_second": 40
+    }
   },
   "initial_balance": 100.0
 }

@@ -63,6 +63,12 @@ DEFAULTS: dict[str, Any] = {
         "key": "",                       # predict.fun x-api-key (optional; enables real fills)
         "base_url": "https://api.predict.fun",
         "real_fill": True,               # use live order book fill when a key is present
+        "rate_limits": {                 # basic-tier limits (requests per minute)
+            "general": 250,
+            "trading": 500,
+            "search": 120,
+            "trading_per_second": 40,
+        },
     },
     "initial_balance": 100.0,
 }

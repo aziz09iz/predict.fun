@@ -51,6 +51,22 @@ Bot punya **dua mode** untuk menghitung PnL:
 3. Isi di `config.json` (`api.key`) atau env `PREDICTFUN_API_KEY`.
 4. Nonaktif-fallback: `api.real_fill` (default `true`).
 
+### Rate limit
+
+API client menghormati limit akun (default tier **basic**):
+
+| Kategori | Limit |
+|---|---|
+| General (markets, orderbook, quote) | 250 req/menit |
+| Trading (order placement/cancel) + burst | 500 req/menit, 40 req/detik |
+| Search | 120 req/menit |
+
+Bot pakai kategori **General** saja untuk fill (`/quote` + `/markets/{id}`), sangat
+ringan (~6 call per 5 menit). Limiter sliding-window menjaga tetap di bawah limit
+dengan aman, dan saat kena **429** bot log `rate-limited` lalu **fallback** ke model
+flat — tidak pernah spam/retry liar. Nilai limit bisa disesuaikan di
+`api.rate_limits`.
+
 ## Instalasi & menjalankan (lokal)
 
 ```bash
