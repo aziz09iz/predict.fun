@@ -1,0 +1,30 @@
+[Unit]
+Description=Predict.fun paper-trading bot (BTC/ETH/BNB 5m Up/Down)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User / WorkingDirectory to your deployment.
+User=predictfun
+Group=predictfun
+WorkingDirectory=/opt/predictfun
+ExecStart=/opt/predictfun/.venv/bin/python /opt/predictfun/bot.py
+Restart=always
+RestartSec=5
+
+# Real-time scheduling is unnecessary; standard fair scheduling is fine.
+Nice=5
+
+# Secrets (optional). Prefer these over storing the token in config.json.
+# Environment=PREDICTFUN_TELEGRAM_TOKEN=...
+# Environment=PREDICTFUN_TELEGRAM_CHAT_ID=...
+
+# Basic hardening.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

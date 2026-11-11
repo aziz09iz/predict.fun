@@ -1,0 +1,29 @@
+{
+  "telegram": {
+    "token": "PASTE_YOUR_BOT_TOKEN_HERE",
+    "chat_id": null,
+    "style": "HTML"
+  },
+  "trading": {
+    "enabled": true,
+    "coins": ["btc", "eth", "bnb"],
+    "stake": 10.0,
+    "min_balance": 0.0
+  },
+  "payout": {
+    "win_multiplier": 2.0
+  },
+  "entry_delay_seconds": 1,
+  "notify": {
+    "startup": true,
+    "on_trade": true,
+    "on_settle": true
+  },
+  "prices": {
+    "ws_url": "wss://data-stream.binance.vision/stream"
+  },
+  "api": {
+    "key": ""
+  },
+  "initial_balance": 100.0
+}

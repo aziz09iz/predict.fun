@@ -1,0 +1,4 @@
+# Predict.fun paper-trading bot — runtime dependencies
+# Python 3.10+
+httpx>=0.24,<1
+websockets>=11,<16
