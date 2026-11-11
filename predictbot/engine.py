@@ -125,49 +125,95 @@ class Engine:
             self._pending[key] = {"open_ts": open_ts, "local_open": local_open, "start_price": None}
 
         # Phase 2: decide direction at open + delay, then open the paper trade.
+        # If the fill for that direction is more expensive than ``entry_max_price``,
+        # keep re-quoting until ``entry_delay_max_seconds`` hoping for a cheaper
+        # fill; at the deadline the entry is dropped (like an unfilled limit order).
         delay = float(self.cfg["entry_delay_seconds"])
+        max_delay = max(delay, float(self.cfg.get("entry_delay_max_seconds", delay)))
+        max_price = float(self.cfg.get("entry_max_price", 1.0))
         due = [k for k, p in self._pending.items() if now >= p["open_ts"] + delay]
         if not due:
             return
-        await self._enrich_start_prices(due)
-        fills = await self._fetch_fills([k[0] for k in due], open_ts)
 
+        # Enrich the authoritative startPrice once per window (skip on later ticks).
+        need_enrich = [k for k in due if self._pending[k].get("start_price") is None]
+        if need_enrich:
+            await self._enrich_start_prices(need_enrich)
+
+        # Decide direction once per coin (the signal is the open+delay instant).
         stake = float(self.cfg["trading"]["stake"])
-        for key in due:
-            info = self._pending.pop(key, None)
-            if info is None:
+        for key in list(due):
+            info = self._pending.get(key)
+            if info is None or "direction" in info:
                 continue
             coin = key[0]
             open_price = info["start_price"] if info["start_price"] else info["local_open"]
             entry_price = self.feed.latest(coin)
             if open_price <= 0 or entry_price <= 0:
+                self._pending.pop(key, None)
                 continue
             # A stale feed collapses open & entry to the same snapshot, which
             # would otherwise surface as a bogus "price equal to open".
             stale_secs = time.time() - self.feed.last_update(coin)
             if stale_secs > FEED_STALE_SECONDS:
                 log.warning("Skipping %s 5m: price feed stale (%.0fs)", coin, stale_secs)
+                self._pending.pop(key, None)
                 continue
             # Flat market: no usable signal.
             if entry_price == open_price:
                 log.info("Skipping %s 5m: price equal to open", coin)
+                self._pending.pop(key, None)
                 continue
-            direction = "UP" if entry_price > open_price else "DOWN"
             if not self._can_open(stake):
                 log.info("Skipping %s 5m: balance limit reached", coin)
+                self._pending.pop(key, None)
                 continue
-            fill = fills.get(coin)
+            info["direction"] = "UP" if entry_price > open_price else "DOWN"
+            info["fill"] = None
+            info["_fill_at"] = 0.0  # fetch the first quote immediately
+
+        # Re-quote fills at most once per second while any coin is still waiting.
+        fill_due = [k for k in due if k in self._pending and now >= self._pending[k].get("_fill_at", 0.0)]
+        if fill_due:
+            fills = await self._fetch_fills([k[0] for k in fill_due], open_ts)
+            for key in fill_due:
+                info = self._pending.get(key)
+                if info is None:
+                    continue
+                info["fill"] = fills.get(key[0])
+                info["_fill_at"] = now + 1.0
+
+        for key in list(due):
+            info = self._pending.get(key)
+            if info is None or info.get("direction") is None:
+                continue
+            coin = key[0]
+            direction = info["direction"]
+            fill = info.get("fill")
             if not fill:
                 log.warning("Skipping %s 5m %s: no real fill available", coin, direction)
+                self._pending.pop(key, None)
                 continue
             fp = fill["fill_up"] if direction == "UP" else fill["fill_down"]
             if not (isinstance(fp, (int, float)) and 0.0 < fp < 1.0):
                 log.warning("Skipping %s 5m %s: invalid fill price %r", coin, direction, fp)
+                self._pending.pop(key, None)
                 continue
+            if fp > max_price:
+                if now < info["open_ts"] + max_delay:
+                    continue  # still too expensive — keep waiting for a cheaper quote
+                log.info("Skipping %s 5m %s: fill %.4f above max %.4f at deadline",
+                         coin, direction, fp, max_price)
+                self._pending.pop(key, None)
+                continue
+            # Fill is within the limit (or the deadline passed with a good price).
+            self._pending.pop(key, None)
+            open_price = info["start_price"] if info["start_price"] else info["local_open"]
+            entry_price = self.feed.latest(coin)
             fill_price = float(fp)
             odds = 1.0 / fill_price
             fee_bps = fill.get("fee_bps")
-            self._place_trade(coin, open_ts, close_ts, open_price, entry_price,
+            self._place_trade(coin, info["open_ts"], key[1], open_price, entry_price,
                               direction, stake, odds, fill_price, fee_bps)
 
     async def _fetch_fills(self, coins: list[str], open_ts: int) -> dict[str, dict]:

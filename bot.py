@@ -72,6 +72,8 @@ CONFIG_ROWS = [
     "trading.stake",
     "trading.min_balance",
     "entry_delay_seconds",
+    "entry_delay_max_seconds",
+    "entry_max_price",
     "telegram.style",
     "notify.level",
     "notify.startup",

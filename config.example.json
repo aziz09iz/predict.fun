@@ -13,6 +13,8 @@
     "min_balance": 0.0
   },
   "entry_delay_seconds": 1,
+  "entry_delay_max_seconds": 10,
+  "entry_max_price": 0.55,
   "notify": {
     "level": "full",
     "startup": true,

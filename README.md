@@ -29,6 +29,13 @@ Untuk setiap jendela 5 menit (open = `startPricePublishTime`):
 4. Saat close, settlement persis aturan predict.fun:
    - UP menang bila `endPrice` > `startPrice`, DOWN menang bila sebaliknya, sama persis → push.
 
+**Limit harga entry**: setelah arah ditentukan, bot cek fill price untuk arah tersebut.
+Kalau ternyata **lebih mahal dari `entry_max_price`** (default `0.55`, 55%), bot tidak
+langsung masuk — ia menunggu re-quote sampai **`entry_delay_max_seconds`** (default 10 detik)
+berharap harga turun ke bawah limit. Kalau sampai batas waktu masih di atas limit, entry
+**di-skip** (seperti limit order yang tidak ter-fill). Set `entry_max_price` = `1.0` untuk
+menonaktifkan limit ini.
+
 ### Model eksekusi & PnL paper ("like a real")
 
 PnL dihitung **100% dari order fill real** — tidak ada odds flat/fallback.
@@ -121,6 +128,8 @@ trading.coins          → btc,eth,bnb
 trading.stake          → USDT per trade (> 0)
 trading.min_balance    → saldo minimum (>= 0)
 entry_delay_seconds    → delay entry setelah open (0..120)
+entry_delay_max_seconds → maks tunggu fill sesuai entry_max_price (0..120)
+entry_max_price        → maks fill price 0..1 (1.0 = nonaktif)
 telegram.style         → HTML | MarkdownV2
 notify.level           → full | compact | settle
 notify.startup         → on|off

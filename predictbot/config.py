@@ -49,6 +49,8 @@ DEFAULTS: dict[str, Any] = {
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
     "entry_delay_seconds": 1,     # decide direction 1s after market open
+    "entry_delay_max_seconds": 10,  # max wait for a fill within the price limit
+    "entry_max_price": 0.55,   # max fill (0..1); 1.0 disables the limit
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
         "startup": True,
@@ -178,6 +180,8 @@ SETTABLE_KEYS = [
     ("trading.stake", "angka", "USDT per trade (> 0)"),
     ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
     ("entry_delay_seconds", "angka", "delay entry setelah open (0..120)"),
+    ("entry_delay_max_seconds", "angka", "maks tunggu fill sesuai entry_max_price (0..120)"),
+    ("entry_max_price", "angka", "maks fill price 0..1 (1.0 = nonaktif)"),
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
     ("notify.startup", "on|off", "pesan start saat boot"),
@@ -206,7 +210,8 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
         if not coins:
             return False, None, "Minimal satu coin (btc,eth,bnb)"
         return True, coins, None
-    if dotted in ("trading.stake", "trading.min_balance", "entry_delay_seconds"):
+    if dotted in ("trading.stake", "trading.min_balance", "entry_delay_seconds",
+                  "entry_delay_max_seconds", "entry_max_price"):
         try:
             val = float(v)
         except ValueError:
@@ -217,6 +222,10 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
             return False, None, "Tidak boleh negatif"
         if dotted == "entry_delay_seconds" and not (0 <= val <= 120):
             return False, None, "Delay antara 0 dan 120 detik"
+        if dotted == "entry_delay_max_seconds" and not (0 <= val <= 120):
+            return False, None, "Delay maks antara 0 dan 120 detik"
+        if dotted == "entry_max_price" and not (0.0 < val <= 1.0):
+            return False, None, "max_price antara 0 dan 1 (1.0 = nonaktif)"
         return True, val, None
     if dotted == "telegram.style":
         s = v.lower()
