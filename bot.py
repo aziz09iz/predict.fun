@@ -2,39 +2,43 @@
 
 Run with ``python bot.py``.  The bot:
 
-  1. streams real-time BTC/ETH/BNB prices from Binance (the exact source
-     predict.fun resolves its crypto markets against),
-  2. for each 5-minute Up/Down window, records the open price, waits 1 second,
-     and enters UP if live > open else DOWN,
-  3. settles each trade at market close (UP wins on close > open, DOWN on the
-     opposite, tie = push),
-  4. exposes control + real-time status through a Telegram bot.
+  1. streams real-time BTC/ETH/BNB prices from Binance (the source predict.fun
+     resolves its crypto markets against),
+  2. anchors open/close to predict.fun's real Chainlink ``startPrice``/``endPrice``,
+  3. for each 5-minute Up/Down window, enters UP if live > open else DOWN at
+     ``open + entry_delay_seconds``,
+  4. settles against predict.fun's actual resolution data,
+  5. exposes control + status through a Telegram bot.
 
-Configuration lives in ``config.json`` (see ``config.example.json``) and can
-also be changed live from Telegram with ``/set``.
+Configuration lives in ``config.json`` and is editable live from Telegram.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import logging
 import signal
 import sys
 import time
 from typing import Any
 
-from predictbot import config as cfgmod
 from predictbot.config import (
     ALL_COINS,
-    load_config,
+    SETTABLE_KEYS,
+    get,
+    get_source,
+    load_config_state,
     save_config,
+    set_key,
     validate_setting,
 )
 from predictbot.db import Database
 from predictbot.engine import Engine
 from predictbot.format import Fmt, direction_tag, format_coin, outcome_tag
 from predictbot.logger import setup_logging
-from predictbot.market import WINDOW_SECONDS, human_ts, market_url, window_open
+from predictbot.market import human_ts, market_url, window_close, window_open
+from predictbot.predictfun import PredictFun
 from predictbot.prices import PriceFeed
 from predictbot.telegram import Telegram
 
@@ -42,27 +46,62 @@ log = logging.getLogger("predictbot")
 
 ARROWS = {"UP": "📈", "DOWN": "📉"}
 
+# Grouped command list — shown by /help and registered as the bot menu.
 COMMANDS = [
     {"command": "start", "description": "Daftar / sapa bot"},
     {"command": "help", "description": "Daftar perintah"},
-    {"command": "status", "description": "Saldo, PnL, posisi & harga live"},
+    {"command": "trade", "description": "on|off — mulai/berhenti trading"},
+    {"command": "status", "description": "Status engine & market"},
+    {"command": "positions", "description": "Posisi terbuka"},
+    {"command": "sell", "description": "<id> — jual posisi manual"},
+    {"command": "account", "description": "Balance, winrate, PnL hari ini"},
+    {"command": "history", "description": "[N] — riwayat trade"},
+    {"command": "config", "description": "Setting efektif + asal nilainya"},
+    {"command": "mode", "description": "Mode saat ini (paper/live)"},
+    {"command": "notify", "description": "full|compact|settle — level notifikasi"},
+    {"command": "set", "description": "<kunci> <nilai> — ubah konfigurasi"},
     {"command": "prices", "description": "Harga realtime BTC/ETH/BNB"},
-    {"command": "config", "description": "Lihat konfigurasi aktif"},
-    {"command": "set", "description": "Ubah konfigurasi: /set <kunci> <nilai>"},
-    {"command": "pause", "description": "Jeda trading"},
-    {"command": "resume", "description": "Lanjutkan trading"},
-    {"command": "history", "description": "Riwayat trade terakhir"},
-    {"command": "settle", "description": "Selesai / settle posisi terbuka saat ini"},
 ]
+
+CONFIG_ROWS = [
+    "mode",
+    "trading.enabled",
+    "trading.coins",
+    "trading.stake",
+    "trading.min_balance",
+    "payout.win_multiplier",
+    "entry_delay_seconds",
+    "telegram.style",
+    "notify.level",
+    "notify.startup",
+]
+
+def _display_value(v: Any) -> str:
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    if isinstance(v, list):
+        return ", ".join(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else f"{v:g}"
+    if v is None or v == "":
+        return "—"
+    return str(v)
+
+
+def _utc_day_start_iso() -> str:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 class PaperBot:
-    def __init__(self, cfg: dict[str, Any]):
+    def __init__(self, cfg: dict[str, Any], origins: dict[str, Any] | None = None):
         self.cfg = cfg
+        self.origins = origins or {}
         self.db = Database()
         self.fmt = Fmt(cfg["telegram"]["style"])
         self.feed = PriceFeed(cfg["prices"]["ws_url"], ALL_COINS)
-        self.engine = Engine(cfg, self.db, self.feed)
+        self.predfun = PredictFun()
+        self.engine = Engine(cfg, self.db, self.feed, self.predfun)
         self.tg = Telegram(cfg["telegram"]["token"], cfg["telegram"]["style"])
         self._tasks: list[asyncio.Task] = []
         self._shutdown = False
@@ -74,7 +113,6 @@ class PaperBot:
         return int(val) if val is not None else None
 
     async def refresh_format(self) -> None:
-        """Pick up style changes after /set telegram.style."""
         self.fmt = Fmt(self.cfg["telegram"]["style"])
         self.tg.style = self.fmt.style
 
@@ -84,39 +122,48 @@ class PaperBot:
 
     async def on_event(self, event_type: str, payload: dict[str, Any]) -> None:
         try:
-            if event_type == "trade" and self.cfg["notify"]["on_trade"]:
-                await self.send_admin(self._trade_message(payload))
-            elif event_type == "settle" and self.cfg["notify"]["on_settle"]:
-                await self.send_admin(self._settle_message(payload))
+            level = self.cfg["notify"]["level"]
+            compact = level == "compact"
+            if event_type == "trade":
+                if level in ("full", "compact"):
+                    await self.send_admin(self._trade_message(payload, compact=compact))
+            elif event_type == "settle":
+                if payload.get("source") == "manual":
+                    return  # /sell replies directly
+                await self.send_admin(self._settle_message(payload, compact=compact))
         except Exception as exc:
             log.exception("notification error: %s", exc)
 
     # ── message builders ────────────────────────────────────────────────────
-    def _trade_message(self, t: dict[str, Any]) -> str:
+    def _trade_message(self, t: dict[str, Any], compact: bool = False) -> str:
         f = self.fmt
         label, emoji = direction_tag(t["direction"])
         coin = format_coin(t["coin"])
+        if compact:
+            return f"{ARROWS.get(t['direction'], '🎯')} {coin} 5m {emoji} {label} · {f.price(t['open_price'])} → {f.price(t['entry_price'])} · {f.money(t['stake'])}"
         odds_text = f"{t['odds']}x"
         lines = [
             f"{ARROWS.get(t['direction'], '🎯')} {f.b('ENTRY')} — {coin} 5m {emoji}",
             f"Direction: {f.b(label)}",
             f"Open {f.price(t['open_price'])} → Entry {f.price(t['entry_price'])}",
             f"Stake {f.money(t['stake'])} · Odds {f.b(odds_text)}",
-            f.link("Buka market", market_url(t["coin"], t["close_ts"])),
+            f.link("Buka market", market_url(t["coin"], t["open_ts"])),
         ]
         return "\n".join(lines)
 
-    def _settle_message(self, t: dict[str, Any]) -> str:
+    def _settle_message(self, t: dict[str, Any], compact: bool = False) -> str:
         f = self.fmt
         label, emoji = outcome_tag(t["outcome"])
         coin = format_coin(t["coin"])
         dlabel, _ = direction_tag(t["direction"])
+        if compact:
+            return f"{emoji} {coin} 5m {dlabel} {label} {f.money(t['pnl'], with_sign=True)} · bal {f.money(self.db.get_balance())}"
         lines = [
             f"{emoji} {f.b(label)} — {coin} 5m {dlabel}",
             f"Open {f.price(t['open_price'])} → Close {f.price(t['close_price'])}",
             f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}",
             f"Balance: {f.money(self.db.get_balance())}",
-            f.link("Market", market_url(t["coin"], t["close_ts"])),
+            f.link("Market", market_url(t["coin"], t["open_ts"])),
         ]
         return "\n".join(lines)
 
@@ -125,15 +172,16 @@ class PaperBot:
         t = self.cfg["trading"]
         coins_str = " · ".join(format_coin(c) for c in t["coins"])
         mult_text = f"{self.cfg['payout']['win_multiplier']}x"
+        mode = self.cfg["mode"]
         prices = self.feed.all_prices()
         lines = [
             f"🚀 {f.b('Predict.fun Paper Bot')} online!",
-            f"Markets: {f.b(coins_str)} — 5m Up/Down",
-            f"Balance: {f.money(self.db.get_balance())} · Stake {f.money(t['stake'])} · Odds {f.b(mult_text)}",
+            f"Mode: {f.b(mode)} · Markets: {f.b(coins_str)} — 5m Up/Down",
+            f"Balance {f.money(self.db.get_balance())} · Stake {f.money(t['stake'])} · Odds {f.b(mult_text)}",
             f"Trading: {f.b('ON' if t['enabled'] else 'OFF')}",
         ]
         live = [f"{format_coin(c)} {f.price(v)}" for c, v in prices.items() if v > 0]
-        lines.append(f"Live: {' · '.join(live)}" if live else f"Live: {f.esc('menghubungkan price feed…')}")
+        lines.append(f"Live: {' · '.join(live)}" if live else f"Live: {f.esc('menghubungkan…')}")
         lines.append(f"{f.esc('/help')} untuk daftar perintah")
         return "\n".join(lines)
 
@@ -146,19 +194,19 @@ class PaperBot:
         prices = self.feed.all_prices()
         now = time.time()
         open_ts = window_open(now)
-        next_open_in = WINDOW_SECONDS - (now - open_ts)
-        pnl = balance - self.db.get_initial_balance()
+        close_ts = window_close(now)
         winrate_text = f"{stats['winrate']:.0f}%"
+        pnl = balance - self.db.get_initial_balance()
         lines = [
             f"📊 {f.b('Status')}",
+            f"Mode {f.b(self.cfg['mode'])} · Trading {f.b('ON' if t['enabled'] else 'OFF')}",
             f"Balance {f.money(balance)} · PnL {f.money(pnl, with_sign=True)}",
             f"Win/Loss/Push: {stats['wins']}/{stats['losses']}/{stats['pushes']} · Winrate {f.b(winrate_text)}",
-            f"Open: {len(self.engine.open_trades())} · Exposure {f.money(exposure)}",
-            f"Trading {f.b('ON' if t['enabled'] else 'OFF')} · Stake {f.money(t['stake'])}",
+            f"Open: {len(self.engine.open_trades())} · Exposure {f.money(exposure)} · Stake {f.money(t['stake'])}",
         ]
         live_lines = [f"{format_coin(c)} {f.price(prices.get(c, 0.0))}" for c in ALL_COINS]
         lines.append(f"Live: {' · '.join(live_lines)}")
-        lines.append(f"Market berikutnya buka ~{int(next_open_in)}s")
+        lines.append(f"Market: {human_ts(open_ts)} → {human_ts(close_ts)} · tutup ~{int(close_ts - now)}s")
         return "\n".join(lines)
 
     def _prices_message(self) -> str:
@@ -172,25 +220,102 @@ class PaperBot:
             lines.append(f"{format_coin(c)}: {f.b(f.price(p))}{stale}")
         return "\n".join(lines)
 
-    def _config_message(self) -> str:
+    def _account_message(self) -> str:
         f = self.fmt
-        t = self.cfg["trading"]
-        p = self.cfg["payout"]
-        mult_text = f"{p['win_multiplier']}x"
-        delay_text = f"{self.cfg['entry_delay_seconds']}s"
-        coins_text = ", ".join(format_coin(c) for c in t["coins"])
+        balance = self.db.get_balance()
+        stats = self.db.stats()
+        today = self.db.stats_since(_utc_day_start_iso())
+        winrate_text = f"{stats['winrate']:.0f}%"
         lines = [
-            f"⚙️ {f.b('Konfigurasi')}",
-            f"Trading: {f.b('ON' if t['enabled'] else 'OFF')}",
-            f"Coins: {f.b(coins_text)}",
-            f"Stake: {f.money(t['stake'])}",
-            f"Min balance: {f.money(t['min_balance'])}",
-            f"Odds (win x): {f.b(mult_text)}",
-            f"Entry delay: {f.b(delay_text)}",
-            f"Style: {f.b(self.cfg['telegram']['style'])}",
-            f"{f.esc('Ubah dengan:')} /set {f.esc('<kunci> <nilai>')}",
+            f"👤 {f.b('Akun')}",
+            f"Balance {f.money(balance)}",
+            f"PnL hari ini {f.money(today['pnl'], with_sign=True)}",
+            f"Winrate {f.b(winrate_text)} · {stats['wins']}W/{stats['losses']}L/{stats['pushes']}P",
+            f"Total trade {stats['total']} · Mode {f.b(self.cfg['mode'])}",
         ]
         return "\n".join(lines)
+
+    def _positions_message(self) -> str:
+        f = self.fmt
+        positions = self.engine.open_trades()
+        if not positions:
+            return f"📌 {f.b('Tidak ada posisi terbuka')}."
+        lines = [f"📌 {f.b(f'Posisi ({len(positions)})')}"]
+        for p in positions:
+            dlabel, demoji = direction_tag(p["direction"])
+            coin = format_coin(p["coin"])
+            lines.append(
+                f"{demoji} #{p['id']} {coin} {dlabel} · "
+                f"{f.price(p['open_price'])} → {f.price(p['entry_price'])} · {f.money(p['stake'])}"
+            )
+        lines.append(f.esc("Tutup: /sell <id>"))
+        return "\n".join(lines)
+
+    def _config_message(self) -> str:
+        f = self.fmt
+        lines = [f"⚙️ {f.b('Konfigurasi (efektif)')}"]
+        for row in CONFIG_ROWS:
+            value = _display_value(get(self.cfg, row))
+            origin = get_source(self.origins, row)
+            lines.append(f"{f.code(row)} = {f.b(f.esc(value))}  ({f.esc(origin)})")
+        lines.append("")
+        lines.append(f"Ubah: {f.esc('/set <kunci> <nilai>')} · daftar kunci: {f.esc('/set')}")
+        return "\n".join(lines)
+
+    def _set_help_message(self) -> str:
+        f = self.fmt
+        lines = [f"🛠 {f.b('Kunci yang bisa diubah')}"]
+        for key, example, desc in SETTABLE_KEYS:
+            lines.append(f"{f.code(key)}  {f.esc(f'({example}) — {desc}')}")
+        lines.append("")
+        lines.append(f"Contoh: {f.code('trading.stake 25')}, {f.code('trading.coins btc,eth')}, {f.code('trading.enabled off')}")
+        return "\n".join(lines)
+
+    def _help_message(self) -> str:
+        f = self.fmt
+        lines = [f"🤖 {f.b('Predict.fun Paper Bot')} — perintah"]
+        sections = [
+            ("Trading", ["trade", "status", "positions", "sell"]),
+            ("Info", ["account", "history", "config", "mode", "prices"]),
+            ("Notifikasi", ["notify"]),
+            ("Config", ["set"]),
+        ]
+        index = {c["command"]: c["description"] for c in COMMANDS}
+        for title, cmds in sections:
+            lines.append(f"")
+            lines.append(f.b(title))
+            for c in cmds:
+                lines.append(f"/{c} — {f.esc(index[c])}")
+        return "\n".join(lines)
+
+    def _history_message(self, arg: str) -> str:
+        f = self.fmt
+        try:
+            n = min(int(arg), 20) if arg else 20
+        except ValueError:
+            n = 20
+        rows = self.db.recent_trades(n)
+        if not rows:
+            return f"📜 {f.b('Belum ada trade')}."
+        lines = [f"📜 {f.b('Riwayat')}"]
+        for r in rows:
+            if r["status"] == "OPEN":
+                dlabel, demoji = direction_tag(r["direction"])
+                lines.append(f"{demoji} {format_coin(r['coin'])} {dlabel} · OPEN · {human_ts(r['open_ts'])}")
+            else:
+                olabel, oemoji = outcome_tag(r["outcome"])
+                dlabel, _ = direction_tag(r["direction"])
+                lines.append(
+                    f"{oemoji} {format_coin(r['coin'])} {dlabel} {f.money(r['pnl'] or 0.0, with_sign=True)} · {human_ts(r['close_ts'])}"
+                )
+        return "\n".join(lines)
+
+    # ── config mutation helper ──────────────────────────────────────────────
+    def _apply_setting(self, key: str, value: Any, origin: str = "telegram") -> None:
+        set_key(self.cfg, key, value)
+        if self.origins:
+            set_key(self.origins, key, origin)
+        save_config(self.cfg)
 
     # ── command handling ────────────────────────────────────────────────────
     async def handle_update(self, update: dict[str, Any]) -> None:
@@ -205,6 +330,8 @@ class PaperBot:
         if self.admin is None:
             if text.startswith("/start"):
                 self.cfg["telegram"]["chat_id"] = chat_id
+                if self.origins:
+                    set_key(self.origins, "telegram.chat_id", "telegram")
                 save_config(self.cfg)
                 log.info("Admin registered: chat_id=%s", chat_id)
                 await self.tg.send(chat_id, self._startup_message())
@@ -216,10 +343,9 @@ class PaperBot:
             await self.tg.send(chat_id, "Maaf, kamu bukan admin bot ini. 🙅")
             return
 
-        parts = text.split(maxsplit=2)
+        parts = text.split(maxsplit=1)
         cmd = parts[0].split("@", 1)[0].lower()
-        arg = parts[1] if len(parts) > 1 else ""
-        rest = parts[2] if len(parts) > 2 else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/start", "/help"):
             await self.tg.send(chat_id, self._help_message())
@@ -227,89 +353,99 @@ class PaperBot:
             await self.tg.send(chat_id, self._status_message())
         elif cmd == "/prices":
             await self.tg.send(chat_id, self._prices_message())
-        elif cmd in ("/config", "/settings"):
-            await self.tg.send(chat_id, self._config_message())
-        elif cmd == "/set":
-            await self._handle_set(chat_id, arg, rest)
-        elif cmd == "/pause":
-            self.cfg["trading"]["enabled"] = False
-            save_config(self.cfg)
-            await self.tg.send(chat_id, f"⏸️ Trading di-{self.fmt.b('PAUSE')}. Gunakan /resume untuk lanjut.")
-        elif cmd == "/resume":
-            self.cfg["trading"]["enabled"] = True
-            save_config(self.cfg)
-            await self.tg.send(chat_id, f"▶️ Trading {self.fmt.b('LANJUT')}.")
+        elif cmd == "/account":
+            await self.tg.send(chat_id, self._account_message())
+        elif cmd == "/positions":
+            await self.tg.send(chat_id, self._positions_message())
         elif cmd == "/history":
             await self.tg.send(chat_id, self._history_message(arg))
-        elif cmd == "/settle":
-            await self._handle_settle(chat_id)
+        elif cmd == "/config":
+            await self.tg.send(chat_id, self._config_message())
+        elif cmd == "/trade":
+            await self._handle_trade(chat_id, arg)
+        elif cmd == "/sell":
+            await self._handle_sell(chat_id, arg)
+        elif cmd == "/mode":
+            await self._handle_mode(chat_id, arg)
+        elif cmd == "/notify":
+            await self._handle_notify(chat_id, arg)
+        elif cmd == "/set":
+            await self._handle_set(chat_id, arg)
         else:
             await self.tg.send(chat_id, f"Perintah tidak dikenal. {self.fmt.esc('/help')}")
 
-    def _help_message(self) -> str:
+    async def _handle_trade(self, chat_id: int, arg: str) -> None:
         f = self.fmt
-        lines = [f"🤖 {f.b('Predict.fun Paper Bot')} — panduan singkat"]
-        for c in COMMANDS:
-            lines.append(f"/{c['command']} — {f.esc(c['description'])}")
-        lines += [
-            "",
-            f.esc("Contoh /set:") + " " + f.code("trading.stake 25") + ", "
-            + f.code("trading.coins btc,eth") + ", " + f.code("trading.enabled off"),
-            "",
-            f.esc("Kunci yang bisa diubah:") + " " + f.b(f.esc(
-                "trading.stake, trading.coins, trading.enabled, trading.min_balance, "
-                "payout.win_multiplier, entry_delay_seconds, telegram.style, "
-                "notify.on_trade, notify.on_settle, notify.startup"
-            )),
-        ]
-        return "\n".join(lines)
+        if not arg:
+            state = "ON" if self.cfg["trading"]["enabled"] else "OFF"
+            await self.tg.send(chat_id, f"Trading: {f.b(state)}. Gunakan /trade on|off.")
+            return
+        ok, parsed, msg = validate_setting("trading.enabled", arg)
+        if not ok:
+            await self.tg.send(chat_id, f"❌ {f.esc(msg)}")
+            return
+        self._apply_setting("trading.enabled", parsed)
+        await self.tg.send(chat_id, f"{'▶️' if parsed else '⏸️'} Trading {f.b('ON' if parsed else 'OFF')}.")
 
-    async def _handle_set(self, chat_id: int, key: str, value: str) -> None:
+    async def _handle_sell(self, chat_id: int, arg: str) -> None:
         f = self.fmt
-        if not key or not value:
-            await self.tg.send(chat_id, "Format: /set <kunci> <nilai>. Contoh: /set trading.stake 25")
+        if not arg.isdigit():
+            await self.tg.send(chat_id, f"Format: /sell <id>. Lihat /positions.")
+            return
+        result, err = self.engine.sell(int(arg))
+        if err:
+            await self.tg.send(chat_id, f"❌ {f.esc(err)}")
+            return
+        await self.send_admin(self._settle_message(result))
+
+    async def _handle_mode(self, chat_id: int, arg: str) -> None:
+        f = self.fmt
+        if not arg:
+            await self.tg.send(chat_id, f"Mode saat ini: {f.b(self.cfg['mode'])}.")
+            return
+        ok, parsed, msg = validate_setting("mode", arg)
+        if not ok:
+            await self.tg.send(chat_id, f"❌ {f.esc(msg)}")
+            return
+        if parsed == "live":
+            await self.tg.send(chat_id, f"⚠️ Mode {f.b('live')} belum tersedia — bot tetap {f.b('paper')} (simulasi dengan data nyata predict.fun).")
+            return
+        self._apply_setting("mode", parsed)
+        await self.tg.send(chat_id, f"✅ Mode: {f.b(parsed)}.")
+
+    async def _handle_notify(self, chat_id: int, arg: str) -> None:
+        f = self.fmt
+        if not arg:
+            await self.tg.send(chat_id, f"Notifikasi: {f.b(self.cfg['notify']['level'])}. Pilihan: full|compact|settle.")
+            return
+        ok, parsed, msg = validate_setting("notify.level", arg)
+        if not ok:
+            await self.tg.send(chat_id, f"❌ {f.esc(msg)}")
+            return
+        self._apply_setting("notify.level", parsed)
+        desc = {"full": "entry + settle (detail)", "compact": "entry + settle (ringkas)", "settle": "hanya settle"}[parsed]
+        await self.tg.send(chat_id, f"✅ Notifikasi: {f.b(parsed)} ({f.esc(desc)}).")
+
+    async def _handle_set(self, chat_id: int, arg: str) -> None:
+        f = self.fmt
+        if not arg:
+            await self.tg.send(chat_id, self._set_help_message())
+            return
+        parts = arg.split(maxsplit=1)
+        key = parts[0].strip()
+        value = parts[1].strip() if len(parts) > 1 else ""
+        if not value:
+            await self.tg.send(chat_id, f"Format: /set <kunci> <nilai>. Contoh: /set trading.stake 25")
             return
         ok, parsed, msg = validate_setting(key, value)
         if not ok:
             await self.tg.send(chat_id, f"❌ {f.esc(msg or 'gagal')}")
             return
-        cfgmod.set_key(self.cfg, key, parsed)
-        save_config(self.cfg)
+        self._apply_setting(key, parsed)
         if key == "telegram.style":
             await self.refresh_format()
         val_display = parsed if not isinstance(parsed, list) else ", ".join(parsed)
         await self.tg.send(chat_id, f"✅ {f.code(key)} = {f.b(str(val_display))}")
-
-    def _history_message(self, arg: str) -> str:
-        f = self.fmt
-        try:
-            n = min(int(arg), 20) if arg else 8
-        except ValueError:
-            n = 8
-        rows = self.db.recent_trades(n)
-        if not rows:
-            return f"📜 {f.b('Tidak ada trade')}."
-        lines = [f"📜 {f.b('Riwayat')}"]
-        for r in rows:
-            if r["status"] == "OPEN":
-                dlabel, demoji = direction_tag(r["direction"])
-                lines.append(f"{demoji} {format_coin(r['coin'])} {dlabel} · OPEN · {human_ts(r['open_ts'])}")
-            else:
-                olabel, oemoji = outcome_tag(r["outcome"])
-                pnl = r["pnl"] or 0.0
-                dlabel, _ = direction_tag(r["direction"])
-                lines.append(f"{oemoji} {format_coin(r['coin'])} {dlabel} {f.money(pnl, with_sign=True)} · {human_ts(r['close_ts'])}")
-        return "\n".join(lines)
-
-    async def _handle_settle(self, chat_id: int) -> None:
-        f = self.fmt
-        open_trades = self.engine.open_trades()
-        if not open_trades:
-            await self.tg.send(chat_id, "Tidak ada posisi terbuka.")
-            return
-        await self.tg.send(chat_id, f"🏁 Menyelesaikan {f.b(str(len(open_trades)))} posisi terbuka…")
-        self.engine.settle_now()
-        await self.tg.send(chat_id, "Selesai. ✅")
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     async def _wait_for_prices(self, timeout: float = 10.0) -> None:
@@ -372,6 +508,7 @@ class PaperBot:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         await self.tg.aclose()
+        await self.predfun.aclose()
         self.db.close()
         log.info("Shutdown complete")
 
@@ -387,8 +524,8 @@ async def main() -> None:
     args = build_parser().parse_args()
     setup_logging(args.log_level)
 
-    cfg = load_config()
-    bot = PaperBot(cfg)
+    cfg, origins = load_config_state()
+    bot = PaperBot(cfg, origins)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

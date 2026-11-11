@@ -5,13 +5,13 @@ Strategy (as specified):
     * if the live price is above the open price -> enter UP,
     * if it is below the open price -> enter DOWN.
 
-Settlement mirrors predict.fun's rules: UP wins when the close price is above
-the open price, DOWN wins when it is below, and an exact tie is a push.
+Pricing is anchored to predict.fun's real data:
+    * the authoritative **open** price is predict.fun's ``startPrice`` (Chainlink),
+    * the authoritative **close** price is predict.fun's ``endPrice`` (published at close),
+    * Binance book-ticker mid is used only for the live price and as a fallback.
 
-Paper PnL is a transparent "coin-flip" model: a winning stake returns
-``stake * win_multiplier``, a losing stake returns nothing.  The default
-``win_multiplier = 2.0`` makes it EV-neutral, so the accumulated balance is a
-pure measure of the strategy's directional skill.
+Settlement mirrors predict.fun exactly: UP wins when close > open, DOWN wins
+when close < open, and an exact tie is a push.
 """
 from __future__ import annotations
 
@@ -24,10 +24,14 @@ from . import market as mkt
 from .config import COIN_SYMBOLS
 from .db import Database
 from .prices import PriceFeed
+from .predictfun import PredictFun
 
 log = logging.getLogger("predictbot.engine")
 
 EventHandler = Callable[[str, dict[str, Any]], Any]
+
+SETTLE_GRACE = 90   # seconds to wait for predict.fun endPrice after close
+FETCH_RETRY = 5     # seconds between settlement re-fetches
 
 
 def settle_result(direction: str | None, open_price: float, close_price: float,
@@ -46,22 +50,25 @@ def settle_result(direction: str | None, open_price: float, close_price: float,
 
 
 class Engine:
-    def __init__(self, cfg: dict[str, Any], db: Database, feed: PriceFeed):
+    def __init__(self, cfg: dict[str, Any], db: Database, feed: PriceFeed,
+                 predfun: Optional[PredictFun] = None):
         self.cfg = cfg
         self.db = db
         self.feed = feed
+        self.predfun = predfun or PredictFun()
         self.on_event: Optional[EventHandler] = None
         self._stop = asyncio.Event()
-        self._pending: dict[tuple[str, int], tuple[int, float]] = {}
+        self._pending: dict[tuple[str, int], dict[str, Any]] = {}
         self._captured: dict[int, set[str]] = {}
         self._open: dict[int, dict[str, Any]] = {}
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     async def start(self) -> None:
-        """Load any OPEN trades left over from a previous run."""
+        """Resume any OPEN trades from a previous run."""
         for row in self.db.open_trades():
             self._open[row["id"]] = dict(row)
-        stale = [t for t in self._open.values() if t["close_ts"] <= int(time.time())]
+        deadline = int(time.time()) - SETTLE_GRACE
+        stale = [t for t in self._open.values() if t["close_ts"] <= deadline]
         for trade in stale:
             log.warning("Expiring unresolved trade #%s (%s %s)", trade["id"], trade["coin"], trade["market_slug"])
             self.db.expire_trade(trade["id"])
@@ -72,12 +79,17 @@ class Engine:
     async def run(self) -> None:
         self._stop.clear()
         await self.start()
-        log.info("Engine started (stake=%.2f, delay=%.1fs)", self.cfg["trading"]["stake"], self.cfg["entry_delay_seconds"])
+        log.info(
+            "Engine started (stake=%.4f, delay=%.1fs, coins=%s)",
+            self.cfg["trading"]["stake"],
+            self.cfg["entry_delay_seconds"],
+            ",".join(self.cfg["trading"]["coins"]),
+        )
         while not self._stop.is_set():
             now = time.time()
             try:
                 await self._tick(now)
-            except Exception as exc:  # keep the loop alive no matter what
+            except Exception as exc:
                 log.exception("Engine tick error: %s", exc)
             await asyncio.sleep(0.2)
 
@@ -96,42 +108,61 @@ class Engine:
         coins = [c for c in self.cfg["trading"]["coins"] if c in COIN_SYMBOLS]
         captured = self._captured.setdefault(close_ts, set())
 
-        # Phase 1: record the "open price" the first instant we see a window.
+        # Phase 1: record the open price the first instant we see a window.
         for coin in coins:
             key = (coin, close_ts)
             if key in self._pending or coin in captured:
                 continue
-            open_price = self.feed.price_at(coin, open_ts)
-            if open_price <= 0:
+            local_open = self.feed.price_at(coin, open_ts)
+            if local_open <= 0:
                 continue  # feed still warming up
             captured.add(coin)
-            self._pending[key] = (open_ts, open_price)
+            self._pending[key] = {"open_ts": open_ts, "local_open": local_open, "start_price": None}
 
         # Phase 2: decide direction at open + delay, then open the paper trade.
         delay = float(self.cfg["entry_delay_seconds"])
+        due = [k for k, p in self._pending.items() if now >= p["open_ts"] + delay]
+        if not due:
+            return
+        await self._enrich_start_prices(due)
+
         stake = float(self.cfg["trading"]["stake"])
         mult = float(self.cfg["payout"]["win_multiplier"])
-        for coin in coins:
-            key = (coin, close_ts)
-            if key not in self._pending:
+        for key in due:
+            info = self._pending.pop(key, None)
+            if info is None:
                 continue
-            open_ts_p, open_price = self._pending[key]
-            if now < open_ts_p + delay:
+            coin = key[0]
+            open_price = info["start_price"] if info["start_price"] else info["local_open"]
+            entry_price = self.feed.price_at(coin, info["open_ts"] + delay) or self.feed.latest(coin)
+            if open_price <= 0 or entry_price <= 0:
+                continue
+            direction = None if entry_price == open_price else ("UP" if entry_price > open_price else "DOWN")
+            if direction is None:
+                log.info("Skipping %s 5m: price equal to open", coin)
                 continue
             if not self._can_open(stake):
-                self._pending.pop(key, None)
-                log.info("Skipping %s: balance limit reached", coin)
+                log.info("Skipping %s 5m: balance limit reached", coin)
                 continue
-            entry_price = self.feed.price_at(coin, open_ts_p + delay)
-            direction = None if entry_price == open_price or entry_price <= 0 else (
-                "UP" if entry_price > open_price else "DOWN"
-            )
-            if direction is None:
-                self._pending.pop(key, None)
-                log.info("Skipping %s 5m: price equal to open at +%.1fs", coin, delay)
-                continue
-            self._pending.pop(key, None)
-            self._place_trade(coin, close_ts, open_ts_p, open_price, entry_price, direction, stake, mult)
+            self._place_trade(coin, open_ts, close_ts, open_price, entry_price, direction, stake, mult)
+
+    async def _enrich_start_prices(self, keys: list[tuple[str, int]]) -> None:
+        """Fetch predict.fun's authoritative startPrice for each due coin."""
+        async def one(key: tuple[str, int]):
+            coin, _ = key
+            info = self._pending.get(key)
+            if info is None:
+                return key, None
+            md = await self.predfun.market_data(coin, info["open_ts"])
+            sp = md.get("start_price") if md else None
+            return key, sp if isinstance(sp, (int, float)) and sp > 0 else None
+
+        results = await asyncio.gather(*(one(k) for k in keys), return_exceptions=True)
+        for r in results:
+            if isinstance(r, tuple) and len(r) == 2:
+                key, sp = r
+                if sp is not None and key in self._pending:
+                    self._pending[key]["start_price"] = float(sp)
 
     def _can_open(self, stake: float) -> bool:
         if not self.cfg["trading"]["enabled"]:
@@ -140,8 +171,9 @@ class Engine:
         exposure = sum(float(t["stake"]) for t in self._open.values())
         return (balance - exposure - stake) >= float(self.cfg["trading"]["min_balance"])
 
-    def _place_trade(self, coin, close_ts, open_ts, open_price, entry_price, direction, stake, mult) -> None:
-        slug = mkt.slug(coin, close_ts)
+    def _place_trade(self, coin, open_ts, close_ts, open_price, entry_price,
+                     direction, stake, mult) -> None:
+        slug = mkt.slug(coin, open_ts)
         trade_id = self.db.insert_trade(
             coin=coin, market_slug=slug, open_ts=open_ts, close_ts=close_ts,
             open_price=open_price, entry_price=entry_price, direction=direction,
@@ -154,56 +186,89 @@ class Engine:
             "direction": direction, "stake": stake, "odds": mult,
         }
         self._open[trade_id] = trade
-        log.info("ENTRY %s %s %s open=%.2f entry=%.2f", coin.upper(), direction, slug, open_price, entry_price)
+        log.info("ENTRY %s %s %s open=%.4f entry=%.4f", coin.upper(), direction, slug, open_price, entry_price)
         self._emit("trade", dict(trade))
 
+    # ── settlement ──────────────────────────────────────────────────────────
     async def _settle(self, now: float) -> None:
         for trade_id, trade in list(self._open.items()):
             if now < trade["close_ts"]:
                 continue
             coin = trade["coin"]
-            close_price = self.feed.price_at(coin, trade["close_ts"])
-            if close_price <= 0:
-                close_price = self.feed.latest(coin)
-            self._resolve(trade_id, trade, close_price)
+            open_ts = trade["open_ts"]
 
-    def settle_now(self) -> None:
-        """Force-settle every open trade at the current live price (used by /settle)."""
-        for trade_id, trade in list(self._open.items()):
-            close_price = self.feed.latest(trade["coin"])
-            self._resolve(trade_id, trade, close_price)
+            # Throttled fetch of predict.fun's real start/end price.
+            if now >= trade.get("_fetch_at", 0.0):
+                trade["_fetch_at"] = now + FETCH_RETRY
+                md = await self.predfun.market_data(coin, open_ts)
+                if md and isinstance(md.get("start_price"), (int, float)):
+                    trade["_pf_start"] = float(md["start_price"])
+                if md and isinstance(md.get("end_price"), (int, float)):
+                    open_price = trade.get("_pf_start") or float(trade["open_price"])
+                    self._resolve(trade_id, trade, open_price, float(md["end_price"]), source="predictfun")
+                    continue
 
-    def _resolve(self, trade_id: int, trade: dict[str, Any], close_price: float) -> None:
+            # endPrice not published yet — wait up to the grace period.
+            if now < trade["close_ts"] + SETTLE_GRACE:
+                continue
+
+            # Fallback: Binance mid at close, best-known open.
+            end_price = self.feed.price_at(coin, trade["close_ts"]) or self.feed.latest(coin)
+            if end_price <= 0:
+                continue
+            open_price = trade.get("_pf_start") or float(trade["open_price"])
+            self._resolve(trade_id, trade, open_price, end_price, source="binance")
+
+    def sell(self, trade_id: int, price: float | None = None) -> tuple[Optional[dict], Optional[str]]:
+        """Manually close an open position now (used by /sell)."""
+        trade = self._open.get(trade_id)
+        if trade is None:
+            return None, "Posisi tidak ditemukan atau sudah ditutup."
         coin = trade["coin"]
+        close_price = price or self.feed.latest(coin)
+        if close_price <= 0:
+            return None, "Harga belum tersedia."
+        result = self._resolve(trade_id, trade, float(trade["open_price"]), close_price, source="manual")
+        return result, None
+
+    def _resolve(self, trade_id: int, trade: dict[str, Any], open_price: float,
+                 close_price: float, source: str = "predictfun") -> dict[str, Any]:
         outcome, pnl = settle_result(
-            trade["direction"], float(trade["open_price"]), close_price,
+            trade["direction"], open_price, close_price,
             float(trade["stake"]), float(trade["odds"]),
         )
         self.db.settle_trade(trade_id, close_price, outcome, pnl)
+        self.db.update_open_price(trade_id, open_price)
         balance = self.db.get_balance() + pnl
         self.db.set_balance(balance)
         self.db.record_balance_event(
             "settle", pnl, balance, trade_id=trade_id,
-            note=f"{coin.upper()} {trade['direction']} 5m {outcome}",
+            note=f"{trade['coin'].upper()} {trade['direction']} 5m {outcome}",
         )
         self._open.pop(trade_id, None)
-        result = {**trade, "close_price": close_price, "outcome": outcome, "pnl": pnl}
+        result = {
+            **trade,
+            "open_price": open_price,
+            "close_price": close_price,
+            "outcome": outcome,
+            "pnl": pnl,
+            "source": source,
+        }
         log.info(
-            "SETTLE %s %s %s %s pnl=%.2f balance=%.2f",
-            coin.upper(), trade["direction"], outcome, trade["market_slug"], pnl, balance,
+            "SETTLE %s %s %s %s pnl=%.4f balance=%.2f (src=%s)",
+            trade["coin"].upper(), trade["direction"], outcome, trade["market_slug"],
+            pnl, balance, source,
         )
         self._emit("settle", result)
-
-    def remove_open(self, trade_id: int) -> None:
-        """Drop a trade from the in-memory open set (after external settlement)."""
-        self._open.pop(trade_id, None)
+        return result
 
     def _prune(self, open_ts: int) -> None:
+        cutoff = open_ts - mkt.WINDOW_SECONDS
         for close_ts in list(self._captured):
-            if close_ts < open_ts - mkt.WINDOW_SECONDS:
+            if close_ts < cutoff:
                 self._captured.pop(close_ts, None)
         for key in list(self._pending):
-            if key[1] < open_ts - mkt.WINDOW_SECONDS:
+            if key[1] < cutoff:
                 self._pending.pop(key, None)
 
     # ── helpers ─────────────────────────────────────────────────────────────
@@ -212,6 +277,10 @@ class Engine:
 
     def open_trades(self) -> list[dict[str, Any]]:
         return [dict(t) for t in self._open.values()]
+
+    def get_position(self, trade_id: int) -> Optional[dict[str, Any]]:
+        t = self._open.get(trade_id)
+        return dict(t) if t else None
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.on_event is not None:

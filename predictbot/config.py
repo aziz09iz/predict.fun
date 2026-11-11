@@ -4,9 +4,13 @@ The bot keeps a single ``config.json`` next to the project root.  Entries are
 merged onto defaults at boot so a partial file still works.  Sensitive values
 (the Telegram token / chat id) can also come from environment variables so the
 systemd unit can inject them without writing secrets into the JSON file.
+
+Each effective value also carries an *origin* (default / file / env / telegram)
+so ``/config`` can show not just what is configured but where it came from.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -25,32 +29,38 @@ COIN_SYMBOLS = {
 }
 ALL_COINS = list(COIN_SYMBOLS)
 
+# Value origin labels shown by /config.
+ORIGIN_DEFAULT = "default"
+ORIGIN_FILE = "file"
+ORIGIN_ENV = "env"
+ORIGIN_TELEGRAM = "telegram"
+
 DEFAULTS: dict[str, Any] = {
     "telegram": {
         "token": "",
         "chat_id": None,          # admin chat id (settable via /start when empty)
         "style": "HTML",          # "HTML" or "MarkdownV2"
     },
+    "mode": "paper",              # "paper" (simulated). "live" is not implemented.
     "trading": {
         "enabled": True,
         "coins": ["btc", "eth", "bnb"],
-        "stake": 10.0,            # USDT risked per trade
+        "stake": 1.0,             # USDT risked per trade
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
     "payout": {
-        "win_multiplier": 2.0,    # 2.0 == fair coin flip: +stake on win, -stake on loss
+        "win_multiplier": 1.8,    # 1.8 == favorite odds: +0.8x on win, -stake on loss
     },
-    "entry_delay_seconds": 1,     # strategy: decide direction 1s after market open
+    "entry_delay_seconds": 1,     # decide direction 1s after market open
     "notify": {
+        "level": "full",          # "full" | "compact" | "settle"
         "startup": True,
-        "on_trade": True,
-        "on_settle": True,
     },
     "prices": {
         "ws_url": "wss://data-stream.binance.vision/stream",
     },
     "api": {
-        "key": "",                # optional predict.fun x-api-key (not required for paper mode)
+        "key": "",                # optional predict.fun x-api-key (unused in paper mode)
     },
     "initial_balance": 100.0,
 }
@@ -66,27 +76,55 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def load_config() -> dict[str, Any]:
-    """Load ``config.json``, creating it from defaults if it does not exist."""
-    if not CONFIG_FILE.exists():
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        save_config(DEFAULTS)
-        return json.loads(json.dumps(DEFAULTS))
+def _origin_tree(value: Any, origin: str) -> Any:
+    if isinstance(value, dict):
+        return {k: _origin_tree(v, origin) for k, v in value.items()}
+    return origin
 
-    try:
-        raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        raw = {}
-    cfg = _deep_merge(json.loads(json.dumps(DEFAULTS)), raw)
 
-    # Environment overrides (used by systemd to avoid storing the token in JSON).
+def _merge_origins(base: dict, override: dict, origin: str) -> dict:
+    out = dict(base)
+    for key, value in override.items():
+        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            out[key] = _merge_origins(out[key], value, origin)
+        else:
+            out[key] = origin
+    return out
+
+
+def load_config_state() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return ``(cfg, origins)`` with defaults merged under any config file/env.
+
+    ``origins`` is a tree mirroring ``cfg`` where each leaf is one of
+    ``ORIGIN_DEFAULT`` / ``ORIGIN_FILE`` / ``ORIGIN_ENV``.
+    """
+    defaults = copy.deepcopy(DEFAULTS)
+    cfg = copy.deepcopy(DEFAULTS)
+    origins = _origin_tree(defaults, ORIGIN_DEFAULT)
+
+    if CONFIG_FILE.exists():
+        try:
+            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            raw = {}
+        cfg = _deep_merge(cfg, raw)
+        origins = _merge_origins(origins, raw, ORIGIN_FILE)
+
     token = os.environ.get("PREDICTFUN_TELEGRAM_TOKEN", "").strip()
     if token:
         cfg["telegram"]["token"] = token
+        origins["telegram"]["token"] = ORIGIN_ENV
     chat_id = os.environ.get("PREDICTFUN_TELEGRAM_CHAT_ID", "").strip()
     if chat_id and chat_id.lstrip("-").isdigit():
         cfg["telegram"]["chat_id"] = int(chat_id)
+        origins["telegram"]["chat_id"] = ORIGIN_ENV
 
+    return cfg, origins
+
+
+def load_config() -> dict[str, Any]:
+    """Convenience wrapper returning just the effective config dict."""
+    cfg, _ = load_config_state()
     return cfg
 
 
@@ -98,6 +136,13 @@ def save_config(cfg: dict[str, Any]) -> None:
 def get(cfg: dict[str, Any], dotted: str) -> Any:
     """Read a nested key like ``trading.stake`` from the config dict."""
     node: Any = cfg
+    for part in dotted.split("."):
+        node = node[part]
+    return node
+
+
+def get_source(origins: dict[str, Any], dotted: str) -> str:
+    node: Any = origins
     for part in dotted.split("."):
         node = node[part]
     return node
@@ -115,15 +160,28 @@ def set_key(cfg: dict[str, Any], dotted: str, value: Any) -> None:
 # ── validation for the /set command ────────────────────────────────────────
 _BOOLS = {"on": True, "off": False, "true": True, "false": False, "1": True, "0": False}
 
+# Curated, human-readable list for `/set` without arguments.
+SETTABLE_KEYS = [
+    ("trading.enabled", "on|off", "hidup/mati trading"),
+    ("trading.coins", "btc,eth,bnb", "subset coin (pisah koma)"),
+    ("trading.stake", "angka", "USDT per trade (> 0)"),
+    ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
+    ("payout.win_multiplier", "angka", "odds menang (> 1)"),
+    ("entry_delay_seconds", "angka", "delay entry setelah open (0..120)"),
+    ("telegram.style", "HTML|MarkdownV2", "format pesan"),
+    ("notify.level", "full|compact|settle", "level notifikasi"),
+    ("notify.startup", "on|off", "pesan start saat boot"),
+]
 
-def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str]:
+
+def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None]:
     """Return ``(ok, parsed_value, message)`` for a whitelisted config key.
 
     Only these keys are editable from Telegram; everything else is rejected so
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
-    if dotted == "trading.enabled":
+    if dotted == "trading.enabled" or dotted == "notify.startup":
         if v.lower() not in _BOOLS:
             return False, None, "Gunakan `on` atau `off`"
         return True, _BOOLS[v.lower()], None
@@ -135,41 +193,23 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str]:
         if not coins:
             return False, None, "Minimal satu coin (btc,eth,bnb)"
         return True, coins, None
-    if dotted == "trading.stake":
+    if dotted in ("trading.stake", "trading.min_balance", "payout.win_multiplier", "entry_delay_seconds"):
         try:
             val = float(v)
         except ValueError:
-            return False, None, "Stake harus angka"
-        if val <= 0:
+            return False, None, f"{dotted} harus angka"
+        if dotted == "trading.stake" and val <= 0:
             return False, None, "Stake harus > 0"
-        return True, val, None
-    if dotted == "trading.min_balance":
-        try:
-            val = float(v)
-        except ValueError:
-            return False, None, "Angka yang valid"
-        if val < 0:
+        if dotted == "trading.min_balance" and val < 0:
             return False, None, "Tidak boleh negatif"
-        return True, val, None
-    if dotted == "payout.win_multiplier":
-        try:
-            val = float(v)
-        except ValueError:
-            return False, None, "Multiplier harus angka"
-        if val <= 1.0:
+        if dotted == "payout.win_multiplier" and val <= 1.0:
             return False, None, "Multiplier harus > 1.0"
-        return True, val, None
-    if dotted == "entry_delay_seconds":
-        try:
-            val = float(v)
-        except ValueError:
-            return False, None, "Delay harus angka"
-        if not 0 <= val <= 120:
+        if dotted == "entry_delay_seconds" and not (0 <= val <= 120):
             return False, None, "Delay antara 0 dan 120 detik"
         return True, val, None
     if dotted == "telegram.style":
-        style = v.upper()
-        if style not in ("HTML", "MARKDOWNV2", "MARKDOWN"):
+        style = v.upper().replace("MARKDOWN", "MARKDOWNV2")
+        if style not in ("HTML", "MARKDOWNV2"):
             return False, None, "Pilih HTML atau MarkdownV2"
         return True, style, None
     if dotted == "telegram.chat_id":
@@ -178,8 +218,14 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str]:
         except ValueError:
             return False, None, "chat_id harus angka"
         return True, val, None
-    if dotted == "notify.on_trade" or dotted == "notify.on_settle" or dotted == "notify.startup":
-        if v.lower() not in _BOOLS:
-            return False, None, "Gunakan `on` atau `off`"
-        return True, _BOOLS[v.lower()], None
-    return False, None, f"`{dotted}` tidak bisa diubah. Cek /settings untuk daftar kunci."
+    if dotted == "notify.level":
+        level = v.lower()
+        if level not in ("full", "compact", "settle"):
+            return False, None, "Pilih full, compact, atau settle"
+        return True, level, None
+    if dotted == "mode":
+        mode = v.lower()
+        if mode not in ("paper", "live"):
+            return False, None, "Pilih paper atau live"
+        return True, mode, None
+    return False, None, f"`{dotted}` tidak bisa diubah. Kirim /set untuk daftar kunci."

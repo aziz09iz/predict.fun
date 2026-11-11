@@ -4,20 +4,20 @@
     "chat_id": null,
     "style": "HTML"
   },
+  "mode": "paper",
   "trading": {
     "enabled": true,
     "coins": ["btc", "eth", "bnb"],
-    "stake": 10.0,
+    "stake": 1.0,
     "min_balance": 0.0
   },
   "payout": {
-    "win_multiplier": 2.0
+    "win_multiplier": 1.8
   },
   "entry_delay_seconds": 1,
   "notify": {
-    "startup": true,
-    "on_trade": true,
-    "on_settle": true
+    "level": "full",
+    "startup": true
   },
   "prices": {
     "ws_url": "wss://data-stream.binance.vision/stream"

@@ -3,37 +3,37 @@
 Bot **paper trading** untuk market **Up/Down 5 menit** di [predict.fun](https://predict.fun/)
 untuk **BTC, ETH, dan BNB** — terintegrasi penuh dengan **Telegram**.
 
-Simulasikan strategi tanpa uang sungguhan: harga diambil realtime, entry dikalkulasi
-otomatis, dan PnL dicatat ke SQLite.
+Simulasi "like a real": harga **open/close diambil langsung dari data resmi predict.fun**
+(Chainlink `startPrice`/`endPrice`), bukan perkiraan lokal. Hasil settlement mengikuti
+resolusi predict.fun secara persis.
 
 ## Fitur
 
 - 🎯 Paper trade semua market 5m Up/Down (BTC / ETH / BNB) — jadwal deterministik, aligned ke menit UTC.
-- ⚡ Harga **realtime** dari Binance `bookTicker` (mid price), sumber harga yang sama dengan resolusi Chainlink predict.fun.
+- ⚡ Harga **realtime** dari Binance `bookTicker` (mid price) — sumber yang sama dengan resolusi Chainlink predict.fun.
+- 🎯 Open/close **persis predict.fun**: diambil dari `startPrice`/`endPrice` publik (Chainlink), bukan Binance lokal.
 - 🤖 Telegram bot: informatif, singkat, friendly, to the point (HTML atau MarkdownV2).
-- ⚙️ Ubah konfigurasi langsung dari Telegram (`/set`), tanpa restart.
+- ⚙️ Ubah konfigurasi dari Telegram (`/set`) + tampil **asal nilainya** (`/config`).
 - 🗄️ SQLite DB (`data/predictbot.db`): riwayat trade, PnL, saldo.
 - 📝 Log berputar (`data/bot.log`).
-- 🚀 Pesan *start* otomatis saat bot jalan.
-- 🐧 Unit systemd siap pakai (`deploy/predictfun.service`).
+- 🚀 Pesan *start* otomatis saat boot.
+- 🐧 Unit systemd (`deploy/predictfun.service`).
 
 ## Strategi
 
-Untuk setiap jendela 5 menit (open = close − 300s):
+Untuk setiap jendela 5 menit (open = `startPricePublishTime`):
 
-1. Catat **open price** tepat saat market buka.
+1. Catat **open price** = `startPrice` predict.fun (Chainlink).
 2. Tunggu **+1 detik** (`entry_delay_seconds`, default 1).
-3. Jika harga live **di atas** open price → entry **UP**; jika **di bawah** → **DOWN**.
-4. Saat close, settlement mengikuti aturan predict.fun:
-   - UP menang bila close > open, DOWN menang bila close < open, sama persis → push.
+3. Jika harga live **di atas** open → entry **UP**; jika **di bawah** → **DOWN**.
+4. Saat close, settlement persis aturan predict.fun:
+   - UP menang bila `endPrice` > `startPrice`, DOWN menang bila sebaliknya, sama persis → push.
 
 ### Model PnL paper
 
-PnL dihitung sederhana & transparan: taruhan `stake` USDT dengan `win_multiplier`
-(default **2.0**, fair coin-flip). Menang → `+stake × (multiplier − 1)`, kalah →
-`−stake`, push → `0`. Dengan multiplier 2.0, akumulasi saldo murni mengukur *skill* arah strategi.
+`win_multiplier` (default **1.8**). Menang → `+stake × (multiplier − 1)`, kalah → `−stake`, push → `0`.
 
-> Karena paper mode, tidak ada kunci API predict.fun maupun deposit yang dibutuhkan.
+> `win_multiplier` ≈ `1 / probabilitas`. 2.0 = fair 50/50; 1.8 ≈ masuk ke sisi favorit.
 
 ## Instalasi & menjalankan (lokal)
 
@@ -48,50 +48,66 @@ python bot.py
 ```
 
 Bot juga membaca `PREDICTFUN_TELEGRAM_TOKEN` dan `PREDICTFUN_TELEGRAM_CHAT_ID`
-dari environment (menimpa `config.json`) — berguna agar token tidak tersimpan di file.
+dari environment (menimpa `config.json`).
 
 ## Daftar perintah Telegram
 
+**Trading**
 | Perintah | Fungsi |
 |---|---|
-| `/start` | Daftar (menjadi admin saat belum ada admin) |
-| `/help` | Panduan singkat |
-| `/status` | Saldo, PnL, posisi terbuka, harga live |
-| `/prices` | Harga realtime BTC/ETH/BNB |
-| `/config` | Lihat konfigurasi aktif |
-| `/set <kunci> <nilai>` | Ubah konfigurasi |
-| `/pause` / `/resume` | Jeda / lanjut trading |
-| `/history [n]` | Riwayat trade terakhir |
-| `/settle` | Paksa settle posisi terbuka sekarang |
+| `/trade on\|off` | mulai / berhenti trading |
+| `/status` | status engine & market |
+| `/positions` | posisi terbuka |
+| `/sell <id>` | jual / tutup posisi manual |
 
-Kunci yang bisa diubah lewat `/set`:
+**Info**
+| Perintah | Fungsi |
+|---|---|
+| `/account` | balance, winrate, PnL hari ini |
+| `/history [N]` | riwayat trade (default 20) |
+| `/config` | setting efektif + asal nilainya |
+| `/mode` | mode saat ini (paper/live) |
+| `/prices` | harga realtime BTC/ETH/BNB |
+
+**Notifikasi**
+| Perintah | Fungsi |
+|---|---|
+| `/notify full\|compact\|settle` | level notifikasi |
+
+**Config**
+| Perintah | Fungsi |
+|---|---|
+| `/set <kunci> <nilai>` | ubah konfigurasi |
+| `/set` | daftar kunci + contoh |
+
+Kunci yang bisa diubah (`/set`):
 
 ```
-trading.stake          → jumlah USDT per trade (float > 0)
-trading.coins          → subset coin, contoh: btc,eth  (pisahkan koma)
-trading.enabled        → on / off
-trading.min_balance    → saldo minimum sebelum berhenti buka posisi
-payout.win_multiplier  → odds menang (float > 1)
+trading.enabled        → on|off
+trading.coins          → btc,eth,bnb
+trading.stake          → USDT per trade (> 0)
+trading.min_balance    → saldo minimum (>= 0)
+payout.win_multiplier  → odds menang (> 1)
 entry_delay_seconds    → delay entry setelah open (0..120)
-telegram.style         → HTML atau MarkdownV2
-telegram.chat_id       → admin chat id
-notify.on_trade        → on / off (notifikasi saat entry)
-notify.on_settle       → on / off (notifikasi saat settle)
-notify.startup         → on / off (pesan start saat boot)
+telegram.style         → HTML | MarkdownV2
+notify.level           → full | compact | settle
+notify.startup         → on|off
+mode                   → paper | live  (live belum tersedia)
 ```
 
-Contoh: `/set trading.stake 25`, `/set trading.coins btc,eth`, `/set trading.enabled off`.
+Contoh: `/set trading.stake 25`, `/set trading.coins btc,eth`, `/set notify.level compact`.
 
 ## Struktur proyek
 
 ```
 bot.py                  # entry point
 predictbot/
-  config.py             # load/save/validasi config.json
+  config.py             # load/save/validasi + origin tracking
   db.py                 # SQLite (trades, saldo, balance events)
-  market.py             # jadwal window & slug market predict.fun
-  prices.py             # feed Binance WebSocket (realtime mid price)
-  engine.py             # engine paper trading + strategi
+  market.py             # jadwal window & slug market (slug = open time)
+  predictfun.py         # fetch startPrice/endPrice Chainlink dari halaman market
+  prices.py             # feed Binance WebSocket (realtime mid, fallback endpoint)
+  engine.py             # engine paper trading + strategi + settlement
   telegram.py           # transport Telegram Bot API (long polling)
   format.py             # formatting HTML / MarkdownV2
   logger.py             # logging ke data/bot.log
@@ -104,7 +120,6 @@ data/                   # dibuat otomatis: bot.log, predictbot.db
 ## Deploy dengan systemd (Linux server)
 
 ```bash
-# 1. taruh project di /opt/predictfun
 sudo mkdir -p /opt/predictfun
 sudo cp -r . /opt/predictfun
 cd /opt/predictfun
@@ -112,28 +127,25 @@ sudo python3 -m venv .venv
 sudo .venv/bin/pip install -r requirements.txt
 sudo cp config.example.json config.json && sudo editor config.json   # isi token
 
-# 2. buat user & pasang service
 sudo useradd -r -s /usr/sbin/nologin predictfun 2>/dev/null || true
 sudo cp deploy/predictfun.service /etc/systemd/system/predictfun.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now predictfun
 sudo systemctl status predictfun
 
-# log live
 tail -f /opt/predictfun/data/bot.log
 ```
 
-Catatan: sesuaikan `User`, `WorkingDirectory`, dan path di dalam
-`deploy/predictfun.service` dengan lokasi sebenarnya. Token Telegram dapat
-diletakkan di `Environment=PREDICTFUN_TELEGRAM_TOKEN=...` agar tidak tersimpan
-dalam `config.json`, atau lewat systemd drop-in.
+Update kode di server: `cd /opt/predictfun && git pull && sudo systemctl restart predictfun`.
 
 ## Catatan teknis
 
-- **Sumber harga**: market crypto predict.fun di-resolve terhadap stream Chainlink
-  yang memakai *mid* dari top-of-book **Binance**. Bot memakai `bookTicker`
-  Binance secara langsung → harga realtime yang persis sama, tanpa API key.
-- **Slug market**: `<coin>-updown-5m-<close_ts>`, contoh
-  `btc-updown-5m-1794391800`. Tautan deep-link disertakan di setiap notifikasi.
-- **Restart aman**: posisi yang masih OPEN dimuat ulang dan disettle normal;
-  posisi yang sudah melewati close saat bot mati ditandai `UNRESOLVED` (tanpa PnL).
+- **Sumber harga open/close**: diambil dari `startPrice`/`endPrice` (Chainlink) yang
+  ter-embed di halaman publik `predict.fun/market/<slug>` — tanpa API key.
+- **Sumber harga live**: Binance `bookTicker` mid (sama seperti stream Chainlink yang
+  dipakai predict.fun), dengan fallback otomatis antar endpoint.
+- **Slug market**: `<coin>-updown-5m-<open_ts>` (waktu **buka**, bukan tutup), contoh
+  `btc-updown-5m-1794397200`. Tautan deep-link disertakan di tiap notifikasi.
+- **Settlement**: menunggu `endPrice` terbit sampai `SETTLE_GRACE` (90s); jika belum
+  ada (mis. CDN lambat), fallback ke Binance mid saat close.
+- **Restart aman**: posisi OPEN dimuat ulang; yang sudah lewat grace ditandai `UNRESOLVED`.

@@ -227,6 +227,51 @@ class Database:
             "pnl": pnl,
         }
 
+    def get_trade(self, trade_id: int) -> Optional[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM trades WHERE id = ?", (trade_id,)
+            ).fetchone()
+
+    def update_open_price(self, trade_id: int, open_price: float) -> None:
+        """Refresh the authoritative open price (predict.fun startPrice) at settle."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE trades SET open_price = ? WHERE id = ?", (open_price, trade_id)
+            )
+            self._conn.commit()
+
+    def stats_since(self, since_iso: str) -> dict[str, Any]:
+        """Settlement stats for trades settled at or after ``since_iso`` (ISO-8601 UTC)."""
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) c FROM trades WHERE status='SETTLED' AND settled_at >= ?",
+                (since_iso,),
+            ).fetchone()["c"]
+            if total == 0:
+                return {"total": 0, "wins": 0, "losses": 0, "pushes": 0, "winrate": 0.0, "pnl": 0.0}
+            row = self._conn.execute(
+                "SELECT "
+                " SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) wins, "
+                " SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) losses, "
+                " SUM(CASE WHEN outcome='PUSH' THEN 1 ELSE 0 END) pushes, "
+                " SUM(COALESCE(pnl,0)) pnl "
+                "FROM trades WHERE status='SETTLED' AND settled_at >= ?",
+                (since_iso,),
+            ).fetchone()
+        wins, losses, pushes = (row[k] or 0 for k in ("wins", "losses", "pushes"))
+        settled = wins + losses + pushes
+        pnl = row["pnl"] or 0.0
+        winrate = (wins / settled * 100.0) if settled else 0.0
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "winrate": winrate,
+            "pnl": pnl,
+        }
+
     def ledger(self, limit: int = 10) -> list[sqlite3.Row]:
         with self._lock:
             return self._conn.execute(
