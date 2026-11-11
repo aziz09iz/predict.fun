@@ -55,6 +55,7 @@ COMMANDS = [
     {"command": "positions", "description": "Posisi terbuka"},
     {"command": "sell", "description": "<id> — jual posisi manual"},
     {"command": "account", "description": "Balance, winrate, PnL hari ini"},
+    {"command": "stats", "description": "Statistik lengkap (per pair, streak, ROI)"},
     {"command": "history", "description": "[N] — riwayat trade"},
     {"command": "config", "description": "Setting efektif + asal nilainya"},
     {"command": "mode", "description": "Mode saat ini (paper/live)"},
@@ -257,7 +258,69 @@ class PaperBot:
         ]
         return "\n".join(lines)
 
-    def _day_bounds(self, offset_days: int) -> tuple[str, str, str]:
+    def _stats_message(self) -> str:
+        f = self.fmt
+        stats = self.db.stats()
+        balance = self.db.get_balance()
+        initial = self.db.get_initial_balance()
+        roi = ((balance - initial) / initial * 100.0) if initial > 0 else 0.0
+        today = self.db.stats_since(_utc_day_start_iso())
+
+        lines = [f"📊 {f.b('Statistik Lengkap')}", ""]
+
+        lines.append(f.b("Keseluruhan"))
+        lines.append(
+            f"Trade {stats['total']} · Win {stats['wins']} · Loss {stats['losses']} · Push {stats['pushes']}"
+        )
+        lines.append(
+            f"Winrate {f.b(f'{stats['winrate']:.1f}%')} · PnL {f.b(f.money(stats['pnl'], with_sign=True))} · ROI {f.b(f'{roi:+.1f}%')}"
+        )
+        lines.append(f"Balance {f.money(balance)} · Awal {f.money(initial)}")
+        lines.append("")
+
+        lines.append(f.b("Hari ini"))
+        lines.append(
+            f"Trade {today['total']} · Winrate {f.b(f'{today['winrate']:.1f}%')} · PnL {f.b(f.money(today['pnl'], with_sign=True))}"
+        )
+        lines.append("")
+
+        lines.append(f.b("Per Pair"))
+        rows = self.db.stats_by_coin()
+        if not rows:
+            lines.append(f.esc("Belum ada trade."))
+        else:
+            for r in rows:
+                coin = format_coin(r["coin"])
+                decided = (r["wins"] or 0) + (r["losses"] or 0) + (r["pushes"] or 0)
+                wr = ((r["wins"] or 0) / decided * 100.0) if decided else 0.0
+                lines.append(
+                    f"{coin}: {r['settled']} trade · {r['wins']}W/{r['losses']}L/{r['pushes']}P · "
+                    f"WR {wr:.0f}% · PnL {f.money(r['pnl'] or 0.0, with_sign=True)} · Vol {f.money(r['volume'] or 0.0)}"
+                )
+        lines.append("")
+
+        recent = self.db.recent_trades(200)
+        settled = [r for r in recent if r["status"] == "SETTLED" and r["pnl"] is not None]
+        best = max((r["pnl"] for r in settled), default=None)
+        worst = min((r["pnl"] for r in settled), default=None)
+        streak, streak_dir = 0, None
+        for r in recent:
+            o = r["outcome"]
+            if o not in ("WIN", "LOSS"):
+                continue
+            if streak_dir is None:
+                streak_dir, streak = o, 1
+            elif o == streak_dir:
+                streak += 1
+            else:
+                break
+        lines.append(f.b("Lainnya"))
+        lines.append(f"Open {len(self.engine.open_trades())} · Exposure {f.money(self.engine.exposure())}")
+        streak_text = f"{streak}{'W' if streak_dir == 'WIN' else 'L' if streak_dir == 'LOSS' else ''}"
+        best_text = f.money(best, with_sign=True) if best is not None else "—"
+        worst_text = f.money(worst, with_sign=True) if worst is not None else "—"
+        lines.append(f"Streak {f.b(streak_text)} · Best {f.b(best_text)} · Worst {f.b(worst_text)}")
+        return "\n".join(lines)
         now = datetime.datetime.now(datetime.timezone.utc)
         day = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=offset_days)
         return day.isoformat(), (day + datetime.timedelta(days=1)).isoformat(), day.strftime("%Y-%m-%d")
@@ -338,7 +401,7 @@ class PaperBot:
         lines = [f"🤖 {f.b('Predict.fun Paper Bot')} — perintah"]
         sections = [
             ("Trading", ["trade", "status", "positions", "sell"]),
-            ("Info", ["account", "history", "summary", "config", "mode", "prices"]),
+            ("Info", ["account", "stats", "history", "summary", "config", "mode", "prices"]),
             ("Notifikasi", ["notify"]),
             ("Config", ["set"]),
         ]
@@ -417,6 +480,8 @@ class PaperBot:
             await self.tg.send(chat_id, self._prices_message())
         elif cmd == "/account":
             await self.tg.send(chat_id, self._account_message())
+        elif cmd == "/stats":
+            await self.tg.send(chat_id, self._stats_message())
         elif cmd == "/positions":
             await self.tg.send(chat_id, self._positions_message())
         elif cmd == "/history":

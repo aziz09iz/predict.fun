@@ -242,6 +242,20 @@ class Database:
             "pnl": pnl,
         }
 
+    def stats_by_coin(self) -> list[sqlite3.Row]:
+        """Per-coin aggregates (settled count, W/L/P, PnL, stake volume)."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT coin, "
+                " SUM(CASE WHEN status='SETTLED' THEN 1 ELSE 0 END) settled, "
+                " SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) wins, "
+                " SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) losses, "
+                " SUM(CASE WHEN outcome='PUSH' THEN 1 ELSE 0 END) pushes, "
+                " SUM(COALESCE(pnl,0)) pnl, "
+                " SUM(COALESCE(stake,0)) volume "
+                "FROM trades GROUP BY coin ORDER BY coin"
+            ).fetchall()
+
     def get_trade(self, trade_id: int) -> Optional[sqlite3.Row]:
         with self._lock:
             return self._conn.execute(

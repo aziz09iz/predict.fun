@@ -95,6 +95,7 @@ dari environment (menimpa `config.json`).
 | Perintah | Fungsi |
 |---|---|
 | `/account` | balance, winrate, PnL hari ini |
+| `/stats` | statistik lengkap (per pair, streak, ROI) |
 | `/history [N]` | riwayat trade (default 20) |
 | `/summary` | rekap harian (hari sebelumnya) |
 | `/config` | setting efektif + asal nilainya |
