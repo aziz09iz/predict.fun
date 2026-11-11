@@ -32,6 +32,7 @@ EventHandler = Callable[[str, dict[str, Any]], Any]
 
 SETTLE_GRACE = 90   # seconds to wait for predict.fun endPrice after close
 FETCH_RETRY = 5     # seconds between settlement re-fetches
+FEED_STALE_SECONDS = 10  # skip entry if the Binance mid is older than this
 
 
 def settle_result(direction: str | None, open_price: float, close_price: float,
@@ -138,13 +139,20 @@ class Engine:
                 continue
             coin = key[0]
             open_price = info["start_price"] if info["start_price"] else info["local_open"]
-            entry_price = self.feed.price_at(coin, info["open_ts"] + delay) or self.feed.latest(coin)
+            entry_price = self.feed.latest(coin)
             if open_price <= 0 or entry_price <= 0:
                 continue
-            direction = None if entry_price == open_price else ("UP" if entry_price > open_price else "DOWN")
-            if direction is None:
+            # A stale feed collapses open & entry to the same snapshot, which
+            # would otherwise surface as a bogus "price equal to open".
+            stale_secs = time.time() - self.feed.last_update(coin)
+            if stale_secs > FEED_STALE_SECONDS:
+                log.warning("Skipping %s 5m: price feed stale (%.0fs)", coin, stale_secs)
+                continue
+            # Flat market: no usable signal.
+            if entry_price == open_price:
                 log.info("Skipping %s 5m: price equal to open", coin)
                 continue
+            direction = "UP" if entry_price > open_price else "DOWN"
             if not self._can_open(stake):
                 log.info("Skipping %s 5m: balance limit reached", coin)
                 continue
