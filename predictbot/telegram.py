@@ -19,10 +19,14 @@ API_BASE = "https://api.telegram.org"
 
 
 class Telegram:
-    def __init__(self, token: str, style: str = "HTML", timeout: float = 30.0):
+    def __init__(self, token: str, style: str = "HTML"):
         self.token = token
         self.style = "MarkdownV2" if style.upper() == "MARKDOWNV2" else "HTML"
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+        # The read timeout must exceed the getUpdates long-poll ``timeout``
+        # (50s), otherwise a slow poll trips httpx and spams the log every ~33s.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=15.0, read=65.0, write=15.0, pool=15.0)
+        )
         self._offset: int | None = None
         self._stop = asyncio.Event()
 
@@ -85,8 +89,11 @@ class Telegram:
                         log.exception("Update handler error: %s", exc)
             except asyncio.CancelledError:
                 raise
+            except httpx.TimeoutException:
+                # Normal for a slow long poll / network blip — retry right away.
+                log.debug("getUpdates timed out; retrying")
             except Exception as exc:
-                log.warning("getUpdates error: %s", exc)
+                log.warning("getUpdates error (%s): %s", type(exc).__name__, exc)
                 await asyncio.sleep(3)
         log.info("Telegram long-polling stopped")
 
