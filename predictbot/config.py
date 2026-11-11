@@ -48,9 +48,6 @@ DEFAULTS: dict[str, Any] = {
         "stake": 1.0,             # USDT risked per trade
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
-    "payout": {
-        "win_multiplier": 1.8,    # fallback odds when a real fill can't be fetched
-    },
     "entry_delay_seconds": 1,     # decide direction 1s after market open
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
@@ -180,7 +177,6 @@ SETTABLE_KEYS = [
     ("trading.coins", "btc,eth,bnb", "subset coin (pisah koma)"),
     ("trading.stake", "angka", "USDT per trade (> 0)"),
     ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
-    ("payout.win_multiplier", "angka", "odds fallback saat fill real tak tersedia (> 1)"),
     ("entry_delay_seconds", "angka", "delay entry setelah open (0..120)"),
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
@@ -210,7 +206,7 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
         if not coins:
             return False, None, "Minimal satu coin (btc,eth,bnb)"
         return True, coins, None
-    if dotted in ("trading.stake", "trading.min_balance", "payout.win_multiplier", "entry_delay_seconds"):
+    if dotted in ("trading.stake", "trading.min_balance", "entry_delay_seconds"):
         try:
             val = float(v)
         except ValueError:
@@ -219,8 +215,6 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
             return False, None, "Stake harus > 0"
         if dotted == "trading.min_balance" and val < 0:
             return False, None, "Tidak boleh negatif"
-        if dotted == "payout.win_multiplier" and val <= 1.0:
-            return False, None, "Multiplier harus > 1.0"
         if dotted == "entry_delay_seconds" and not (0 <= val <= 120):
             return False, None, "Delay antara 0 dan 120 detik"
         return True, val, None

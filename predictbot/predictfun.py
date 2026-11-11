@@ -8,7 +8,7 @@ Two independent sources are combined:
 
 * **Authenticated REST** (``x-api-key``) — ``market_quote()`` / ``market_detail()`` /
   ``fill_for()`` read the live order book top-of-book (best bid/ask) and fee so the
-  paper bot can fill "like a real" order instead of a flat odds model.
+  paper bot fills a "like a real" order (share count = ``stake / fill_price``).
 
 Fill convention (from the API reference): the quote is expressed against the *Yes*
 outcome (indexSet=1). To buy the complementary *No* side: ``No ask = 1 - Yes bid``
@@ -136,7 +136,7 @@ class PredictFun:
             if exc.response.status_code == 429:
                 retry_after = exc.response.headers.get("Retry-After")
                 log.warning(
-                    "predict.fun API rate-limited (429) on %s%s; falling back to flat odds",
+                    "predict.fun API rate-limited (429) on %s%s; entry will be skipped this window",
                     path, f" (retry-after={retry_after}s)" if retry_after else "",
                 )
             else:
@@ -183,7 +183,7 @@ class PredictFun:
 
         Returns ``{fill_up, fill_down, fee_bps, source}`` where ``fill_up`` is the
         all-in price-per-share to BUY Yes (Up) and ``fill_down`` to BUY No (Down).
-        ``None`` means no quote is available and the caller should fall back.
+        ``None`` means no quote is available and the caller should skip the entry.
         """
         q = await self.market_quote(coin, open_ts)
         if not q:

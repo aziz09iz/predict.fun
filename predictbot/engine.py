@@ -35,7 +35,11 @@ FETCH_RETRY = 5     # seconds between settlement re-fetches
 
 
 def settle_result(direction: str | None, open_price: float, close_price: float,
-                  stake: float, mult: float) -> tuple[str, float]:
+                  stake: float, odds: float) -> tuple[str, float]:
+    """Odds is the real fill multiplier ``1 / fill_price``.
+
+    Win returns ``stake × (odds − 1)`` (i.e. ``shares − stake``), loss ``−stake``.
+    """
     if open_price <= 0 or close_price <= 0:
         return "UNRESOLVED", 0.0
     if close_price > open_price:
@@ -45,7 +49,7 @@ def settle_result(direction: str | None, open_price: float, close_price: float,
     else:
         return "PUSH", 0.0
     if direction == won:
-        return "WIN", stake * (mult - 1.0)
+        return "WIN", stake * (odds - 1.0)
     return "LOSS", -stake
 
 
@@ -128,7 +132,6 @@ class Engine:
         fills = await self._fetch_fills([k[0] for k in due], open_ts)
 
         stake = float(self.cfg["trading"]["stake"])
-        mult = float(self.cfg["payout"]["win_multiplier"])
         for key in due:
             info = self._pending.pop(key, None)
             if info is None:
@@ -145,14 +148,17 @@ class Engine:
             if not self._can_open(stake):
                 log.info("Skipping %s 5m: balance limit reached", coin)
                 continue
-            odds, fill_price, fee_bps = mult, None, None
             fill = fills.get(coin)
-            if fill:
-                fp = fill["fill_up"] if direction == "UP" else fill["fill_down"]
-                if isinstance(fp, (int, float)) and 0.0 < fp < 1.0:
-                    fill_price = float(fp)
-                    odds = 1.0 / fill_price
-                    fee_bps = fill.get("fee_bps")
+            if not fill:
+                log.warning("Skipping %s 5m %s: no real fill available", coin, direction)
+                continue
+            fp = fill["fill_up"] if direction == "UP" else fill["fill_down"]
+            if not (isinstance(fp, (int, float)) and 0.0 < fp < 1.0):
+                log.warning("Skipping %s 5m %s: invalid fill price %r", coin, direction, fp)
+                continue
+            fill_price = float(fp)
+            odds = 1.0 / fill_price
+            fee_bps = fill.get("fee_bps")
             self._place_trade(coin, open_ts, close_ts, open_price, entry_price,
                               direction, stake, odds, fill_price, fee_bps)
 
@@ -160,8 +166,8 @@ class Engine:
         """Best-effort live fills from predict.fun's authenticated quote endpoint.
 
         Returns ``{coin: {fill_up, fill_down, fee_bps}}``.  Empty when no API key
-        is configured or real fills are disabled — the engine then falls back to
-        the flat ``win_multiplier`` model.
+        is configured or real fills are disabled — entries are then skipped until
+        a live fill is available again (no flat fallback).
         """
         if not (self.cfg["api"].get("key") and self.cfg["api"].get("real_fill", True)):
             return {}
@@ -205,6 +211,7 @@ class Engine:
     def _place_trade(self, coin, open_ts, close_ts, open_price, entry_price,
                      direction, stake, odds, fill_price=None, fee_bps=None) -> None:
         slug = mkt.slug(coin, open_ts)
+        shares = stake / fill_price if (fill_price and 0.0 < fill_price < 1.0) else 0.0
         trade_id = self.db.insert_trade(
             coin=coin, market_slug=slug, open_ts=open_ts, close_ts=close_ts,
             open_price=open_price, entry_price=entry_price, direction=direction,
@@ -215,13 +222,13 @@ class Engine:
             "open_ts": open_ts, "close_ts": close_ts,
             "open_price": open_price, "entry_price": entry_price,
             "direction": direction, "stake": stake, "odds": odds,
-            "fill_price": fill_price, "fee_bps": fee_bps,
+            "fill_price": fill_price, "fee_bps": fee_bps, "shares": shares,
         }
         self._open[trade_id] = trade
         log.info(
-            "ENTRY %s %s %s open=%.4f entry=%.4f fill=%s odds=%.4f",
+            "ENTRY %s %s %s open=%.4f entry=%.4f fill=%.4f shares=%.4f odds=%.4f",
             coin.upper(), direction, slug, open_price, entry_price,
-            f"{fill_price:.4f}" if fill_price else "flat", odds,
+            float(fill_price or 0.0), shares, odds,
         )
         self._emit("trade", dict(trade))
 

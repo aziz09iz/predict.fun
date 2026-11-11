@@ -29,27 +29,26 @@ Untuk setiap jendela 5 menit (open = `startPricePublishTime`):
 4. Saat close, settlement persis aturan predict.fun:
    - UP menang bila `endPrice` > `startPrice`, DOWN menang bila sebaliknya, sama persis → push.
 
-### Model eksekusi & PnL paper
+### Model eksekusi & PnL paper ("like a real")
 
-Bot punya **dua mode** untuk menghitung PnL:
+PnL dihitung **100% dari order fill real** — tidak ada odds flat/fallback.
 
-**1. Real fill (dengan `api.key`)** — order di-fill seperti real:
 - Ambil **best bid/ask** live via `GET /v1/markets/{id}/quote`.
 - Beli UP (Yes) di `bestAsk.price`; beli DOWN (No) di `1 − bestBid.price`.
 - Fee diambil dari `feeRateBps` market.
-- Menang → `+stake × (1/fill − 1)`, kalah → `−stake`, push → `0`.
+- **Jumlah share** = `stake / fill_price` (contoh: stake $1 di fill 52% → **1.9231 share**).
+- Menang → tiap share redeem **$1**, jadi profit `stake × (1/fill − 1)` (contoh **+$0.92**);
+  kalah → `−stake` (share hangus); push → `0`.
 
-**2. Flat (tanpa `api.key`)** — fallback:
-- `win_multiplier` (default **1.8**). Menang → `+stake × (multiplier − 1)`, kalah → `−stake`.
-
-> `win_multiplier` ≈ `1 / probabilitas`. 2.0 = fair 50/50; 1.8 ≈ masuk ke sisi favorit.
+Bot **butuh `api.key`** untuk mendapat fill. Tanpa fill live yang valid, entry **di-skip**
+(bukan jatuh ke odds flat) — persis akun real: tidak ada harga = tidak order.
 
 ### Mendapatkan API key (untuk real fill)
 
 1. Buka **Developers → API** di account predict.fun (https://developers.predict.fun).
 2. Buat **API key**.
 3. Isi di `config.json` (`api.key`) atau env `PREDICTFUN_API_KEY`.
-4. Nonaktif-fallback: `api.real_fill` (default `true`).
+4. Pastikan `api.real_fill` = `true` (default) agar fill real aktif.
 
 ### Rate limit
 
@@ -63,8 +62,8 @@ API client menghormati limit akun (default tier **basic**):
 
 Bot pakai kategori **General** saja untuk fill (`/quote` + `/markets/{id}`), sangat
 ringan (~6 call per 5 menit). Limiter sliding-window menjaga tetap di bawah limit
-dengan aman, dan saat kena **429** bot log `rate-limited` lalu **fallback** ke model
-flat — tidak pernah spam/retry liar. Nilai limit bisa disesuaikan di
+dengan aman, dan saat kena **429** bot log `rate-limited` lalu **skip** entry pada
+jendela itu — tidak pernah spam/retry liar. Nilai limit bisa disesuaikan di
 `api.rate_limits`.
 
 ## Instalasi & menjalankan (lokal)
@@ -120,7 +119,6 @@ trading.enabled        → on|off
 trading.coins          → btc,eth,bnb
 trading.stake          → USDT per trade (> 0)
 trading.min_balance    → saldo minimum (>= 0)
-payout.win_multiplier  → odds menang (> 1)
 entry_delay_seconds    → delay entry setelah open (0..120)
 telegram.style         → HTML | MarkdownV2
 notify.level           → full | compact | settle

@@ -70,7 +70,6 @@ CONFIG_ROWS = [
     "trading.coins",
     "trading.stake",
     "trading.min_balance",
-    "payout.win_multiplier",
     "entry_delay_seconds",
     "telegram.style",
     "notify.level",
@@ -163,9 +162,9 @@ class PaperBot:
         ]
         fp = t.get("fill_price")
         if isinstance(fp, (int, float)) and 0 < fp < 1:
-            lines.append(f"Fill {f.b(f'{fp:.4f}')} · Payout {f.b(f'{1 / fp:.2f}x')}{f.esc(self._fee_text(t.get('fee_bps')))}")
-        else:
-            lines.append(f"Odds {f.b(f'{t['odds']}x')} (flat)")
+            shares = float(t["stake"]) / float(fp)
+            fee = self._fee_text(t.get("fee_bps"))
+            lines.append(f"Fill {f.b(f'{fp:.2%}')} → {f.b(f'{shares:.4f}')} shares · max {f.money(shares)}{f.esc(fee)}")
         lines.append(f.link("Buka market", market_url(t["coin"], t["open_ts"])))
         return "\n".join(lines)
 
@@ -182,7 +181,8 @@ class PaperBot:
         ]
         fp = t.get("fill_price")
         if isinstance(fp, (int, float)) and 0 < fp < 1:
-            lines.append(f"Fill {f.b(f'{fp:.4f}')} · Payout {f.b(f'{1 / fp:.2f}x')}")
+            shares = float(t["stake"]) / float(fp)
+            lines.append(f"🎟 {f.b(f'{shares:.4f}')} shares @ {f.b(f'{fp:.2%}')}")
         lines.append(f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}")
         lines.append(f"Balance: {f.money(self.db.get_balance())}")
         lines.append(f.link("Market", market_url(t["coin"], t["open_ts"])))
@@ -192,13 +192,13 @@ class PaperBot:
         f = self.fmt
         t = self.cfg["trading"]
         coins_str = " · ".join(format_coin(c) for c in t["coins"])
-        mult_text = f"{self.cfg['payout']['win_multiplier']}x"
+        fill_mode = "real" if (self.cfg["api"].get("key") and self.cfg["api"].get("real_fill", True)) else "off"
         mode = self.cfg["mode"]
         prices = self.feed.all_prices()
         lines = [
             f"🚀 {f.b('Predict.fun Paper Bot')} online!",
             f"Mode: {f.b(mode)} · Markets: {f.b(coins_str)} — 5m Up/Down",
-            f"Balance {f.money(self.db.get_balance())} · Stake {f.money(t['stake'])} · Odds {f.b(mult_text)}",
+            f"Balance {f.money(self.db.get_balance())} · Stake {f.money(t['stake'])} · Fill {f.b(fill_mode)}",
             f"Trading: {f.b('ON' if t['enabled'] else 'OFF')}",
         ]
         live = [f"{format_coin(c)} {f.price(v)}" for c, v in prices.items() if v > 0]
@@ -218,7 +218,7 @@ class PaperBot:
         close_ts = window_close(now)
         winrate_text = f"{stats['winrate']:.0f}%"
         pnl = balance - self.db.get_initial_balance()
-        fill_mode = "real" if (self.cfg["api"].get("key") and self.cfg["api"].get("real_fill", True)) else "flat"
+        fill_mode = "real" if (self.cfg["api"].get("key") and self.cfg["api"].get("real_fill", True)) else "off"
         lines = [
             f"📊 {f.b('Status')}",
             f"Mode {f.b(self.cfg['mode'])} · Trading {f.b('ON' if t['enabled'] else 'OFF')} · Fill {f.b(fill_mode)}",
