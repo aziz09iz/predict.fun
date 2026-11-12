@@ -218,9 +218,16 @@ class Engine:
                          coin, direction, fp, max_price)
                 self._pending.pop(key, None)
                 continue
+            open_price = info["start_price"] if info["start_price"] else info["local_open"]
+            # Price must still be on the chosen side of the open at fill time —
+            # otherwise we'd buy the *disfavored* side after the market flipped.
+            entry_now = self.feed.latest(coin)
+            if open_price > 0 and entry_now > 0 and (direction == "UP") != (entry_now > open_price):
+                log.info("Skipping %s 5m %s: price flipped before fill", coin, direction)
+                self._pending.pop(key, None)
+                continue
             # Fill is within the limit (or the deadline passed with a good price).
             self._pending.pop(key, None)
-            open_price = info["start_price"] if info["start_price"] else info["local_open"]
             entry_price = self.feed.latest(coin)
             fill_price = float(fp)
             odds = 1.0 / fill_price
