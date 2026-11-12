@@ -43,6 +43,7 @@ Semua di `config.json` (lihat `config.example.json`) dan bisa diubah live via Te
 | `time_entry` | `[1, 10]` | **jendela entry**: `[mulai, batas]` detik setelah open |
 | `entry_max_price` | `0.55` | harga fill maksimal 0–1 (`1.0` = nonaktif) |
 | `exit_on_reversal` | `true` | close posisi saat harga balik melewati open |
+| `per_coin.<coin>.*` | lihat bawah | override khusus per coin (time_entry / entry_max_price / exit_on_reversal) |
 | `notify.*` | — | level notifikasi + rekap harian otomatis |
 | `api.key` / `api.real_fill` | — | API key predict.fun (wajib untuk fill real) |
 | `api.rate_limits` | basic tier | limit request (250/min general, dll.) |
@@ -59,6 +60,32 @@ Contoh config strategi (hasil backtest 1 hari, lihat bagian Backtest):
 > **Config lama masih dikenali**: jika `config.json` lama memakai
 > `entry_delay_seconds`/`entry_delay_max_seconds`, bot otomatis menerjemahkannya ke
 > `time_entry`.
+
+### Setting per coin
+
+Setiap coin punya karakter berbeda, jadi `time_entry`, `entry_max_price`, dan
+`exit_on_reversal` bisa diatur **khusus per coin** lewat `per_coin` (nilai di sini
+meng-override nilai global; key yang tidak diisi ikut nilai global):
+
+```json
+"per_coin": {
+  "btc": {"time_entry": [45, 165], "entry_max_price": 0.65, "exit_on_reversal": false},
+  "eth": {"time_entry": [10, 15], "entry_max_price": 0.65, "exit_on_reversal": false},
+  "bnb": {"time_entry": [20, 35], "entry_max_price": 0.52, "exit_on_reversal": false}
+}
+```
+
+Nilai default di atas = **config terbaik per coin** hasil backtest 1 hari (2026-11-11):
+BTC +$29.43, ETH +$19.02, BNB +$13.03 per hari (stake $1) — total +$61.48, lebih baik
+dari satu config global untuk semua coin (+$46.11). Ubah via Telegram, contoh:
+
+```
+/set per_coin.btc.time_entry 45,165
+/set per_coin.eth.entry_max_price 0.65
+/set per_coin.bnb.exit_on_reversal off
+```
+
+Hasil efektif per coin tampil di `/config` (bagian "Per coin").
 
 ## Perintah Telegram
 
@@ -105,6 +132,7 @@ trading.min_balance    → saldo minimum (>= 0)
 time_entry             → start,end (contoh: 1,10)
 entry_max_price        → angka 0..1 (1.0 = nonaktif)
 exit_on_reversal       → on|off
+per_coin.<coin>.*      → override per coin (contoh: per_coin.btc.time_entry 45,165)
 telegram.style         → HTML | MarkdownV2
 notify.*               → level/startup/daily_summary/daily_summary_time
 api.real_fill          → on|off (butuh api.key)

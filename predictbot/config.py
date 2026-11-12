@@ -51,6 +51,13 @@ DEFAULTS: dict[str, Any] = {
     "time_entry": [1.0, 10.0],    # entry window [start, end] seconds after open
     "entry_max_price": 0.55,      # max fill (0..1); 1.0 disables the limit
     "exit_on_reversal": True,     # close early if price crosses back over the open price
+    # Per-coin overrides (best params per coin, from the 1-day backtest). Any key
+    # omitted here falls back to the global value above.
+    "per_coin": {
+        "btc": {"time_entry": [45.0, 165.0], "entry_max_price": 0.65, "exit_on_reversal": False},
+        "eth": {"time_entry": [10.0, 15.0], "entry_max_price": 0.65, "exit_on_reversal": False},
+        "bnb": {"time_entry": [20.0, 35.0], "entry_max_price": 0.52, "exit_on_reversal": False},
+    },
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
         "startup": True,
@@ -190,6 +197,10 @@ SETTABLE_KEYS = [
     ("time_entry", "start,end", "jendela entry: detik mulai & batas setelah open (contoh 1,10)"),
     ("entry_max_price", "angka", "maks fill price 0..1 (1.0 = nonaktif)"),
     ("exit_on_reversal", "on|off", "close posisi saat harga balik melewati open price"),
+    ("per_coin.btc.time_entry", "start,end", "jendela entry khusus BTC (contoh 45,165)"),
+    ("per_coin.eth.entry_max_price", "angka", "maks fill khusus ETH (0..1)"),
+    ("per_coin.bnb.exit_on_reversal", "on|off", "exit-on-reversal khusus BNB"),
+    # pola yang sama untuk coin lain: per_coin.<coin>.<time_entry|entry_max_price|exit_on_reversal>
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
     ("notify.startup", "on|off", "pesan start saat boot"),
@@ -206,6 +217,13 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
+    # per-coin override: per_coin.<coin>.<time_entry|entry_max_price|exit_on_reversal>
+    if dotted.startswith("per_coin."):
+        parts = dotted.split(".")
+        if len(parts) != 3 or parts[1] not in ALL_COINS or parts[2] not in (
+                "time_entry", "entry_max_price", "exit_on_reversal"):
+            return False, None, "Format: per_coin.<coin>.<kunci> — coin: btc/eth/bnb"
+        dotted = parts[2]  # divalidasi dengan aturan yang sama seperti kunci global
     if dotted in ("trading.enabled", "notify.startup", "api.real_fill", "notify.daily_summary",
                   "exit_on_reversal"):
         if v.lower() not in _BOOLS:

@@ -86,11 +86,14 @@ class Engine:
     async def run(self) -> None:
         self._stop.clear()
         await self.start()
-        t_start, t_end = self._entry_window()
+        summary = []
+        for coin in self.cfg["trading"]["coins"]:
+            cc = self._coin_cfg(coin)
+            summary.append(f"{coin.upper()}[{cc['start']:.0f}-{cc['end']:.0f}s"
+                           f",mp{cc['max_price']:.2f},exit{1 if cc['exit_on_reversal'] else 0}]")
         log.info(
-            "Engine started (stake=%.4f, entry window=%ds..%ds, coins=%s)",
-            self.cfg["trading"]["stake"], t_start, t_end,
-            ",".join(self.cfg["trading"]["coins"]),
+            "Engine started (stake=%.4f, coins=%s)",
+            self.cfg["trading"]["stake"], " ".join(summary),
         )
         while not self._stop.is_set():
             now = time.time()
@@ -112,14 +115,21 @@ class Engine:
         await self._settle(now)
         self._prune(open_ts)
 
-    def _entry_window(self) -> tuple[float, float]:
-        """``(start, end)`` seconds after open when entries may happen."""
-        te = self.cfg.get("time_entry") or [1.0, 10.0]
+    def _coin_cfg(self, coin: str) -> dict:
+        """Effective strategy params for one coin (per-coin override > global)."""
+        over = self.cfg.get("per_coin", {}).get(coin) or {}
+        te = over.get("time_entry") or self.cfg.get("time_entry") or [1.0, 10.0]
         try:
             start, end = float(te[0]), float(te[1])
         except (TypeError, ValueError, IndexError):
             start, end = 1.0, 10.0
-        return start, max(start, end)
+        return {
+            "start": start,
+            "end": max(start, end),
+            "max_price": float(over.get("entry_max_price", self.cfg.get("entry_max_price", 1.0))),
+            "exit_on_reversal": bool(over.get("exit_on_reversal",
+                                              self.cfg.get("exit_on_reversal", True))),
+        }
 
     async def _capture_and_entry(self, now: float, open_ts: int, close_ts: int) -> None:
         coins = [c for c in self.cfg["trading"]["coins"] if c in COIN_SYMBOLS]
@@ -136,14 +146,13 @@ class Engine:
             captured.add(coin)
             self._pending[key] = {"open_ts": open_ts, "local_open": local_open, "start_price": None}
 
-        # Phase 2: decide direction at open + time_entry[0], then open the paper
-        # trade. If the fill for that direction is more expensive than
-        # ``entry_max_price``, keep re-quoting until ``time_entry[1]`` hoping for a
-        # cheaper fill; at that deadline the entry is dropped (like an unfilled
-        # limit order).
-        start_s, end_s = self._entry_window()
-        max_price = float(self.cfg.get("entry_max_price", 1.0))
-        due = [k for k, p in self._pending.items() if now >= p["open_ts"] + start_s]
+        # Phase 2: decide direction at open + time_entry[0] (per coin), then open
+        # the paper trade. If the fill for that direction is more expensive than
+        # ``entry_max_price`` (per coin), keep re-quoting until ``time_entry[1]``
+        # hoping for a cheaper fill; at that deadline the entry is dropped (like an
+        # unfilled limit order).
+        due = [k for k, p in self._pending.items()
+               if now >= p["open_ts"] + self._coin_cfg(k[0])["start"]]
         if not due:
             return
 
@@ -211,11 +220,12 @@ class Engine:
                 log.warning("Skipping %s 5m %s: invalid fill price %r", coin, direction, fp)
                 self._pending.pop(key, None)
                 continue
-            if fp > max_price:
-                if now < info["open_ts"] + end_s:
+            cc = self._coin_cfg(coin)
+            if fp > cc["max_price"]:
+                if now < info["open_ts"] + cc["end"]:
                     continue  # still too expensive — keep waiting for a cheaper quote
                 log.info("Skipping %s 5m %s: fill %.4f above max %.4f at deadline",
-                         coin, direction, fp, max_price)
+                         coin, direction, fp, cc["max_price"])
                 self._pending.pop(key, None)
                 continue
             open_price = info["start_price"] if info["start_price"] else info["local_open"]
@@ -342,18 +352,18 @@ class Engine:
         For an UP position the entry signal was ``price > open``; if the live price
         later falls back below ``open`` the thesis is invalidated, so we sell the
         shares at the current market instead of holding to binary resolution.
-        Symmetric for DOWN.  Disabled via ``exit_on_reversal = off``.
+        Symmetric for DOWN.  Per-coin: set ``per_coin.<coin>.exit_on_reversal``.
         """
-        if not self.cfg.get("exit_on_reversal", True):
-            return
         for trade_id, trade in list(self._open.items()):
+            coin = trade["coin"]
+            if not self._coin_cfg(coin)["exit_on_reversal"]:
+                continue  # exit-on-reversal dimatikan untuk coin ini
             direction = trade.get("direction")
             if direction not in ("UP", "DOWN"):
                 continue
             open_price = float(trade.get("open_price") or 0.0)
             if open_price <= 0:
                 continue
-            coin = trade["coin"]
             live = self.feed.latest(coin)
             if live <= 0:
                 continue

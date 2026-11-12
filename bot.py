@@ -409,6 +409,15 @@ class PaperBot:
             origin = get_source(self.origins, row)
             lines.append(f"{f.code(row)} = {f.b(f.esc(value))}  ({f.esc(origin)})")
         lines.append("")
+        lines.append(f.b("Per coin"))
+        for coin in self.cfg["trading"]["coins"]:
+            cc = self.engine._coin_cfg(coin)
+            ex = "on" if cc["exit_on_reversal"] else "off"
+            lines.append(
+                f"{format_coin(coin)}: time_entry [{cc['start']:g},{cc['end']:g}] · "
+                f"max_price {cc['max_price']:g} · exit {ex}"
+            )
+        lines.append("")
         lines.append(f"Ubah: {f.esc('/set <kunci> <nilai>')} · daftar kunci: {f.esc('/set')}")
         return "\n".join(lines)
 
