@@ -35,8 +35,7 @@ Semua di `config.json` (lihat `config.example.json`) dan bisa diubah live via Te
 |---|---|---|
 | `telegram.token` / `telegram.chat_id` | — | token bot & chat admin (boleh via env) |
 | `mode` | `paper` | paper (simulasi); live belum tersedia |
-| `trading.enabled` | `true` | hidup/mati trading |
-| `trading.coins` | `btc,eth,bnb` | coin yang ditradingkan |
+| `trading.enabled` | `true` | hidup/mati trading **semua** coin (master switch) |
 | `trading.stake` | `1.0` | USDT per trade |
 | `trading.min_balance` | `0.0` | berhenti entry jika saldo di bawah ini |
 | `time_entry` | `[1, 10]` | **jendela entry**: `[mulai, batas]` detik setelah open |
@@ -127,7 +126,7 @@ Kunci `/set` utama:
 
 ```
 trading.enabled        → on|off
-trading.coins          → btc,eth,bnb
+trading.enabled        → on|off (master: semua coin)
 trading.stake          → USDT per trade (> 0)
 trading.min_balance    → saldo minimum (>= 0)
 time_entry             → start,end (contoh: 1,10)

@@ -43,7 +43,6 @@ DEFAULTS: dict[str, Any] = {
     "mode": "paper",              # "paper" (simulated). "live" is not implemented.
     "trading": {
         "enabled": True,
-        "coins": ["btc", "eth", "bnb"],
         "stake": 1.0,             # USDT risked per trade
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
@@ -131,6 +130,16 @@ def load_config_state() -> tuple[dict[str, Any], dict[str, Any]]:
             end = float(raw.get("entry_delay_max_seconds", start))
             cfg["time_entry"] = [start, max(start, end)]
             origins["time_entry"] = ORIGIN_FILE
+        # Legacy mapping: the removed ``trading.coins`` list becomes per-coin
+        # ``enabled`` toggles — coins NOT listed in the old config are disabled.
+        old_coins = (raw.get("trading") or {}).get("coins")
+        if isinstance(old_coins, list):
+            for c in ALL_COINS:
+                if c in old_coins:
+                    continue
+                cfg.setdefault("per_coin", {}).setdefault(c, {})["enabled"] = False
+                origins.setdefault("per_coin", {}).setdefault(c, {}).setdefault(
+                    "enabled", ORIGIN_FILE)
 
     token = os.environ.get("PREDICTFUN_TELEGRAM_TOKEN", "").strip()
     if token:
@@ -189,7 +198,7 @@ _BOOLS = {"on": True, "off": False, "true": True, "false": False, "1": True, "0"
 # Curated, human-readable list for `/set` without arguments.
 SETTABLE_KEYS = [
     ("trading.enabled", "on|off", "hidup/mati trading"),
-    ("trading.coins", "btc,eth,bnb", "subset coin (pisah koma)"),
+    ("trading.enabled", "on|off", "hidup/mati trading semua coin"),
     ("trading.stake", "angka", "USDT per trade (> 0)"),
     ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
     ("time_entry", "start,end", "jendela entry: detik mulai & batas setelah open (contoh 1,10)"),
@@ -238,14 +247,6 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
         if not (0 <= start <= end <= 299):
             return False, None, "Rentang 0..299 detik, dan start <= end"
         return True, [start, end], None
-    if dotted == "trading.coins":
-        coins = [c.strip().lower() for c in v.replace(",", " ").split() if c.strip()]
-        bad = [c for c in coins if c not in ALL_COINS]
-        if bad:
-            return False, None, f"Coin tidak dikenal: {', '.join(bad)}. Pilihan: {', '.join(ALL_COINS)}"
-        if not coins:
-            return False, None, "Minimal satu coin (btc,eth,bnb)"
-        return True, coins, None
     if dotted in ("trading.stake", "trading.min_balance", "entry_max_price"):
         try:
             val = float(v)

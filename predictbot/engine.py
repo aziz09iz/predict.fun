@@ -87,8 +87,10 @@ class Engine:
         self._stop.clear()
         await self.start()
         summary = []
-        for coin in self.cfg["trading"]["coins"]:
+        for coin in COIN_SYMBOLS:
             cc = self._coin_cfg(coin)
+            if not cc["enabled"]:
+                continue
             summary.append(f"{coin.upper()}[{cc['start']:.0f}-{cc['end']:.0f}s"
                            f",mp{cc['max_price']:.2f},exit{1 if cc['exit_on_reversal'] else 0}]")
         log.info(
@@ -133,8 +135,7 @@ class Engine:
         }
 
     async def _capture_and_entry(self, now: float, open_ts: int, close_ts: int) -> None:
-        coins = [c for c in self.cfg["trading"]["coins"]
-                 if c in COIN_SYMBOLS and self._coin_cfg(c)["enabled"]]
+        coins = [c for c in COIN_SYMBOLS if self._coin_cfg(c)["enabled"]]
         captured = self._captured.setdefault(close_ts, set())
 
         # Phase 1: record the open price the first instant we see a window.

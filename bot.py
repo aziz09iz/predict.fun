@@ -69,7 +69,6 @@ COMMANDS = [
 CONFIG_ROWS = [
     "mode",
     "trading.enabled",
-    "trading.coins",
     "trading.stake",
     "trading.min_balance",
     "time_entry",
@@ -211,7 +210,9 @@ class PaperBot:
     def _startup_message(self) -> str:
         f = self.fmt
         t = self.cfg["trading"]
-        coins_str = " · ".join(format_coin(c) for c in t["coins"])
+        coins_str = " · ".join(
+            format_coin(c) for c in ALL_COINS if self.engine._coin_cfg(c)["enabled"]
+        )
         fill_mode = "real" if (self.cfg["api"].get("key") and self.cfg["api"].get("real_fill", True)) else "off"
         mode = self.cfg["mode"]
         prices = self.feed.all_prices()
@@ -404,7 +405,7 @@ class PaperBot:
             lines.append(f"{f.code(row)} = {f.b(f.esc(value))}  ({f.esc(origin)})")
         lines.append("")
         lines.append(f.b("Per coin"))
-        for coin in self.cfg["trading"]["coins"]:
+        for coin in ALL_COINS:
             cc = self.engine._coin_cfg(coin)
             ex = "on" if cc["exit_on_reversal"] else "off"
             status = "ON" if cc["enabled"] else "OFF"
@@ -422,7 +423,7 @@ class PaperBot:
         for key, example, desc in SETTABLE_KEYS:
             lines.append(f"{f.code(key)}  {f.esc(f'({example}) — {desc}')}")
         lines.append("")
-        lines.append(f"Contoh: {f.code('trading.stake 25')}, {f.code('trading.coins btc,eth')}, {f.code('trading.enabled off')}")
+        lines.append(f"Contoh: {f.code('trading.stake 25')}, {f.code('per_coin.btc.enabled off')}, {f.code('trading.enabled off')}")
         return "\n".join(lines)
 
     def _help_message(self) -> str:

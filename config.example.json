@@ -6,7 +6,6 @@
   "mode": "paper",
   "trading": {
     "enabled": true,
-    "coins": ["btc", "eth", "bnb"],
     "stake": 1.0,
     "min_balance": 0.0
   },
