@@ -37,7 +37,7 @@ from predictbot.db import Database
 from predictbot.engine import Engine
 from predictbot.format import Fmt, direction_tag, format_coin, outcome_tag
 from predictbot.logger import setup_logging
-from predictbot.market import human_ts, market_url, window_close, window_open
+from predictbot.market import human_ts, window_close, window_open
 from predictbot.predictfun import PredictFun
 from predictbot.prices import PriceFeed
 from predictbot.telegram import Telegram
@@ -172,7 +172,6 @@ class PaperBot:
             shares = float(t["stake"]) / float(fp)
             fee = self._fee_text(t.get("fee_bps"))
             lines.append(f"Fill {f.b(f'{fp:.2%}')} → {f.b(f'{shares:.4f}')} shares · max {f.money(shares)}{f.esc(fee)}")
-        lines.append(f.link("Buka market", market_url(t["coin"], t["open_ts"])))
         return "\n".join(lines)
 
     def _settle_message(self, t: dict[str, Any], compact: bool = False) -> str:
@@ -192,7 +191,6 @@ class PaperBot:
             lines.append(f"🎟 {f.b(f'{shares:.4f}')} shares @ {f.b(f'{fp:.2%}')}")
         lines.append(f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}")
         lines.append(f"Balance: {f.money(self.db.get_balance())}")
-        lines.append(f.link("Market", market_url(t["coin"], t["open_ts"])))
         return "\n".join(lines)
 
     def _exit_message(self, t: dict[str, Any], compact: bool = False) -> str:
@@ -214,7 +212,6 @@ class PaperBot:
             )
         lines.append(f"PnL: {f.b(f.money(t['pnl'], with_sign=True))}")
         lines.append(f"Balance: {f.money(self.db.get_balance())}")
-        lines.append(f.link("Market", market_url(t["coin"], t["open_ts"])))
         return "\n".join(lines)
 
     def _startup_message(self) -> str:
