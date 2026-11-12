@@ -75,9 +75,7 @@ CONFIG_ROWS = [
     "time_entry",
     "entry_max_price",
     "exit_on_reversal",
-    "telegram.style",
     "notify.level",
-    "notify.startup",
     "notify.daily_summary",
     "notify.daily_summary_time",
     "api.real_fill",
@@ -105,7 +103,7 @@ class PaperBot:
         self.cfg = cfg
         self.origins = origins or {}
         self.db = Database()
-        self.fmt = Fmt(cfg["telegram"]["style"])
+        self.fmt = Fmt("HTML")  # style HTML permanen
         self.feed = PriceFeed(cfg["prices"]["ws_url"], ALL_COINS)
         self.predfun = PredictFun(
             api_key=cfg["api"].get("key", ""),
@@ -113,7 +111,7 @@ class PaperBot:
             rate_limits=cfg["api"].get("rate_limits"),
         )
         self.engine = Engine(cfg, self.db, self.feed, self.predfun)
-        self.tg = Telegram(cfg["telegram"]["token"], cfg["telegram"]["style"])
+        self.tg = Telegram(cfg["telegram"]["token"], "HTML")  # style HTML permanen
         self._tasks: list[asyncio.Task] = []
         self._shutdown = False
 
@@ -122,10 +120,6 @@ class PaperBot:
     def admin(self) -> int | None:
         val = self.cfg["telegram"].get("chat_id")
         return int(val) if val is not None else None
-
-    async def refresh_format(self) -> None:
-        self.fmt = Fmt(self.cfg["telegram"]["style"])
-        self.tg.style = self.fmt.style
 
     async def send_admin(self, text: str) -> None:
         if self.admin is not None:
@@ -413,8 +407,9 @@ class PaperBot:
         for coin in self.cfg["trading"]["coins"]:
             cc = self.engine._coin_cfg(coin)
             ex = "on" if cc["exit_on_reversal"] else "off"
+            status = "ON" if cc["enabled"] else "OFF"
             lines.append(
-                f"{format_coin(coin)}: time_entry [{cc['start']:g},{cc['end']:g}] · "
+                f"{format_coin(coin)} ({status}): time_entry [{cc['start']:g},{cc['end']:g}] · "
                 f"max_price {cc['max_price']:g} · exit {ex}"
             )
         lines.append("")
@@ -605,8 +600,6 @@ class PaperBot:
             await self.tg.send(chat_id, f"❌ {f.esc(msg or 'gagal')}")
             return
         self._apply_setting(key, parsed)
-        if key == "telegram.style":
-            await self.refresh_format()
         val_display = parsed if not isinstance(parsed, list) else ", ".join(parsed)
         await self.tg.send(chat_id, f"✅ {f.code(key)} = {f.b(str(val_display))}")
 
@@ -647,9 +640,7 @@ class PaperBot:
         ]
 
         await self._wait_for_prices()
-        if self.cfg["notify"]["startup"] and self.admin is not None:
-            await self.send_admin(self._startup_message())
-        elif self.admin is None:
+        if self.admin is None:
             log.info("No admin chat set — open Telegram and send /start to register.")
 
         log.info("Bot running. Balance=%.2f", self.db.get_balance())

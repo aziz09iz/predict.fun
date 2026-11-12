@@ -1,9 +1,7 @@
 {
   "telegram": {
     "token": "PASTE_YOUR_BOT_TOKEN_HERE",
-    "chat_id": null,
-    "style": "HTML",
-    "_note_style": "options: HTML | MarkdownV2"
+    "chat_id": null
   },
   "mode": "paper",
   "trading": {
@@ -16,13 +14,12 @@
   "entry_max_price": 0.55,
   "exit_on_reversal": true,
   "per_coin": {
-    "btc": {"time_entry": [45, 165], "entry_max_price": 0.65, "exit_on_reversal": false},
-    "eth": {"time_entry": [10, 15], "entry_max_price": 0.65, "exit_on_reversal": false},
-    "bnb": {"time_entry": [20, 35], "entry_max_price": 0.52, "exit_on_reversal": false}
+    "btc": {"enabled": true, "time_entry": [45, 165], "entry_max_price": 0.65, "exit_on_reversal": false},
+    "eth": {"enabled": true, "time_entry": [10, 15], "entry_max_price": 0.65, "exit_on_reversal": false},
+    "bnb": {"enabled": true, "time_entry": [20, 35], "entry_max_price": 0.52, "exit_on_reversal": false}
   },
   "notify": {
     "level": "full",
-    "startup": true,
     "daily_summary": true,
     "daily_summary_time": "00:05"
   },

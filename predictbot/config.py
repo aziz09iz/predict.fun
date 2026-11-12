@@ -39,7 +39,6 @@ DEFAULTS: dict[str, Any] = {
     "telegram": {
         "token": "",
         "chat_id": None,          # admin chat id (settable via /start when empty)
-        "style": "HTML",          # "HTML" (default) | "MarkdownV2"
     },
     "mode": "paper",              # "paper" (simulated). "live" is not implemented.
     "trading": {
@@ -60,7 +59,6 @@ DEFAULTS: dict[str, Any] = {
     },
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
-        "startup": True,
         "daily_summary": True,    # send an automatic daily recap
         "daily_summary_time": "00:05",  # UTC HH:MM
     },
@@ -200,10 +198,9 @@ SETTABLE_KEYS = [
     ("per_coin.btc.time_entry", "start,end", "jendela entry khusus BTC (contoh 45,165)"),
     ("per_coin.eth.entry_max_price", "angka", "maks fill khusus ETH (0..1)"),
     ("per_coin.bnb.exit_on_reversal", "on|off", "exit-on-reversal khusus BNB"),
-    # pola yang sama untuk coin lain: per_coin.<coin>.<time_entry|entry_max_price|exit_on_reversal>
-    ("telegram.style", "HTML|MarkdownV2", "format pesan"),
+    ("per_coin.btc.enabled", "on|off", "hidup/mati trading khusus BTC"),
+    # pola yang sama untuk coin lain: per_coin.<coin>.<enabled|time_entry|entry_max_price|exit_on_reversal>
     ("notify.level", "full|compact|settle", "level notifikasi"),
-    ("notify.startup", "on|off", "pesan start saat boot"),
     ("notify.daily_summary", "on|off", "rekap harian otomatis"),
     ("notify.daily_summary_time", "HH:MM", "jam rekap (UTC)"),
     ("api.real_fill", "on|off", "order fill real (butuh api.key)"),
@@ -217,14 +214,15 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
-    # per-coin override: per_coin.<coin>.<time_entry|entry_max_price|exit_on_reversal>
+    # per-coin override: per_coin.<coin>.<enabled|time_entry|entry_max_price|exit_on_reversal>
     if dotted.startswith("per_coin."):
         parts = dotted.split(".")
         if len(parts) != 3 or parts[1] not in ALL_COINS or parts[2] not in (
-                "time_entry", "entry_max_price", "exit_on_reversal"):
+                "enabled", "time_entry", "entry_max_price", "exit_on_reversal"):
             return False, None, "Format: per_coin.<coin>.<kunci> — coin: btc/eth/bnb"
-        dotted = parts[2]  # divalidasi dengan aturan yang sama seperti kunci global
-    if dotted in ("trading.enabled", "notify.startup", "api.real_fill", "notify.daily_summary",
+        dotted = "trading.enabled" if parts[2] == "enabled" else parts[2]
+        # divalidasi dengan aturan yang sama seperti kunci global
+    if dotted in ("trading.enabled", "api.real_fill", "notify.daily_summary",
                   "exit_on_reversal"):
         if v.lower() not in _BOOLS:
             return False, None, "Gunakan `on` atau `off`"
@@ -260,13 +258,6 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
         if dotted == "entry_max_price" and not (0.0 < val <= 1.0):
             return False, None, "max_price antara 0 dan 1 (1.0 = nonaktif)"
         return True, val, None
-    if dotted == "telegram.style":
-        s = v.lower()
-        if s == "html":
-            return True, "HTML", None
-        if s in ("markdown", "markdownv2"):
-            return True, "MarkdownV2", None
-        return False, None, "Pilih HTML atau MarkdownV2"
     if dotted == "telegram.chat_id":
         try:
             val = int(v)

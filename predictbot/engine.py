@@ -106,7 +106,7 @@ class Engine:
     def stop(self) -> None:
         self._stop.set()
 
-# ── tick ────────────────────────────────────────────────────────────────
+    # ── tick ────────────────────────────────────────────────────────────────
     async def _tick(self, now: float) -> None:
         open_ts = mkt.window_open(now)
         close_ts = open_ts + mkt.WINDOW_SECONDS
@@ -124,6 +124,7 @@ class Engine:
         except (TypeError, ValueError, IndexError):
             start, end = 1.0, 10.0
         return {
+            "enabled": bool(over.get("enabled", True)),
             "start": start,
             "end": max(start, end),
             "max_price": float(over.get("entry_max_price", self.cfg.get("entry_max_price", 1.0))),
@@ -132,7 +133,8 @@ class Engine:
         }
 
     async def _capture_and_entry(self, now: float, open_ts: int, close_ts: int) -> None:
-        coins = [c for c in self.cfg["trading"]["coins"] if c in COIN_SYMBOLS]
+        coins = [c for c in self.cfg["trading"]["coins"]
+                 if c in COIN_SYMBOLS and self._coin_cfg(c)["enabled"]]
         captured = self._captured.setdefault(close_ts, set())
 
         # Phase 1: record the open price the first instant we see a window.
@@ -152,7 +154,8 @@ class Engine:
         # hoping for a cheaper fill; at that deadline the entry is dropped (like an
         # unfilled limit order).
         due = [k for k, p in self._pending.items()
-               if now >= p["open_ts"] + self._coin_cfg(k[0])["start"]]
+               if now >= p["open_ts"] + self._coin_cfg(k[0])["start"]
+               and self._coin_cfg(k[0])["enabled"]]
         if not due:
             return
 
