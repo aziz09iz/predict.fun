@@ -1,120 +1,69 @@
 # Predict.fun Paper Bot
 
 Bot **paper trading** untuk market **Up/Down 5 menit** di [predict.fun](https://predict.fun/)
-untuk **BTC, ETH, dan BNB** — terintegrasi penuh dengan **Telegram**.
+untuk **BTC, ETH, dan BNB**, terintegrasi **Telegram**.
 
-Simulasi "like a real": harga **open/close diambil langsung dari data resmi predict.fun**
-(Chainlink `startPrice`/`endPrice`), bukan perkiraan lokal. Hasil settlement mengikuti
-resolusi predict.fun secara persis.
+Dibuat *like a real*: harga **open/close** dari data resmi predict.fun (Chainlink
+`startPrice`/`endPrice`), order **fill** dari order book live (via `x-api-key`),
+dan fee market asli (`feeRateBps`). Tidak ada odds flat — PnL 100% dari fill real.
 
-## Fitur
+## Cara kerja (sederhana)
 
-- 🎯 Paper trade semua market 5m Up/Down (BTC / ETH / BNB) — jadwal deterministik, aligned ke menit UTC.
-- ⚡ Harga **realtime** dari Binance `bookTicker` (mid price) — sumber yang sama dengan resolusi Chainlink predict.fun.
-- 🎯 Open/close **persis predict.fun**: diambil dari `startPrice`/`endPrice` publik (Chainlink), bukan Binance lokal.
-- 🤖 Telegram bot: informatif, singkat, friendly, to the point (HTML atau MarkdownV2).
-- ⚙️ Ubah konfigurasi dari Telegram (`/set`) + tampil **asal nilainya** (`/config`).
-- 🗄️ SQLite DB (`data/predictbot.db`): riwayat trade, PnL, saldo.
-- 📝 Log berputar (`data/bot.log`).
-- 🚀 Pesan *start* otomatis saat boot.
-- 🐧 Unit systemd (`deploy/predictfun.service`).
+Setiap 5 menit ada market baru. Untuk setiap window:
 
-## Strategi
+1. **Open price** = `startPrice` Chainlink milik predict.fun.
+2. Di detik **`time_entry[0]`** setelah open, bot lihat harga live (Binance mid —
+   sumber yang sama dengan Chainlink):
+   - harga di **atas** open → entry **UP**
+   - harga di **bawah** open → entry **DOWN**
+3. Kalau harga fill-nya lebih mahal dari **`entry_max_price`**, bot menunggu re-quote
+   sampai **`time_entry[1]`**; lewat batas itu entry di-skip (seperti limit order hangus).
+4. **`exit_on_reversal`** (opsional): kalau harga balik melewati open price melawan
+   posisi sebelum close, posisi dijual di harga pasar saat itu.
+5. Saat close: settlement pakai `endPrice` Chainlink — UP menang bila close > open,
+   DOWN menang bila sebaliknya, sama persis → push.
+6. **Jumlah share** = `stake / fill_price`. Menang: share di-redeem $1 (dikurangi fee).
+   Kalah: share hangus (−stake). Contoh: stake $1, fill 52% → 1.923 share; menang
+   ≈ +$0.92 (setelah fee 2%), kalah −$1.
 
-Untuk setiap jendela 5 menit (open = `startPricePublishTime`):
+## Config
 
-1. Catat **open price** = `startPrice` predict.fun (Chainlink).
-2. Tunggu **+1 detik** (`entry_delay_seconds`, default 1).
-3. Jika harga live **di atas** open → entry **UP**; jika **di bawah** → **DOWN**.
-4. Saat close, settlement persis aturan predict.fun:
-   - UP menang bila `endPrice` > `startPrice`, DOWN menang bila sebaliknya, sama persis → push.
+Semua di `config.json` (lihat `config.example.json`) dan bisa diubah live via Telegram
+(`/set`). Asal nilai tampil di `/config` (default/file/env/telegram).
 
-**Limit harga entry**: setelah arah ditentukan, bot cek fill price untuk arah tersebut.
-Kalau ternyata **lebih mahal dari `entry_max_price`** (default `0.55`, 55%), bot tidak
-langsung masuk — ia menunggu re-quote sampai **`entry_delay_max_seconds`** (default 10 detik)
-berharap harga turun ke bawah limit. Kalau sampai batas waktu masih di atas limit, entry
-**di-skip** (seperti limit order yang tidak ter-fill). Set `entry_max_price` = `1.0` untuk
-menonaktifkan limit ini.
+| Kunci | Default | Arti (bahasa sederhana) |
+|---|---|---|
+| `telegram.token` / `telegram.chat_id` | — | token bot & chat admin (boleh via env) |
+| `telegram.style` | `HTML` | format pesan: `HTML` atau `MarkdownV2` |
+| `mode` | `paper` | paper (simulasi); live belum tersedia |
+| `trading.enabled` | `true` | hidup/mati trading |
+| `trading.coins` | `btc,eth,bnb` | coin yang ditradingkan |
+| `trading.stake` | `1.0` | USDT per trade |
+| `trading.min_balance` | `0.0` | berhenti entry jika saldo di bawah ini |
+| `time_entry` | `[1, 10]` | **jendela entry**: `[mulai, batas]` detik setelah open |
+| `entry_max_price` | `0.55` | harga fill maksimal 0–1 (`1.0` = nonaktif) |
+| `exit_on_reversal` | `true` | close posisi saat harga balik melewati open |
+| `notify.*` | — | level notifikasi + rekap harian otomatis |
+| `api.key` / `api.real_fill` | — | API key predict.fun (wajib untuk fill real) |
+| `api.rate_limits` | basic tier | limit request (250/min general, dll.) |
+| `initial_balance` | `100.0` | saldo awal simulasi |
 
-**Exit saat reversal** (`exit_on_reversal`, default `on`): setelah entry, bot memantau harga
-live. Jika harga **balik melewati open price** melawan posisi (UP tapi harga turun ke bawah
-open, atau DOWN tapi harga naik ke atas open), tesis entry dianggap batal — bot **menjual
-share di harga pasar saat itu** (bukan tunggu resolusi biner), merealisasi PnL, lalu menunggu
-round berikutnya. PnL exit = `shares × exit_price − stake`, dengan `exit_price` diambil dari
-sisi jual order book (UP → `bestBid`, DOWN → `1 − bestAsk`). Matikan lewat
-`/set exit_on_reversal off`.
+Contoh config strategi (hasil backtest 1 hari, lihat bagian Backtest):
 
-**Flip on reversal** (`flip_on_reversal`, default `off`) — mode *stop-and-reverse*:
-selama jendela entry `[open+entry_delay_seconds … open+entry_delay_max_seconds]`, setiap kali
-harga **menyeberang open price** dan **bertahan di sisi baru selama `flip_confirm_seconds`**
-(default 1 detik, filter anti-noise), bot **menutup posisi lama di harga pasar lalu membuka
-posisi arah baru** (reverse). Aturan:
-
-- Selalu maksimal **1 posisi per coin** (tidak pernah stack UP+DOWN).
-- `entry_max_price` tetap berlaku: kalau fill arah baru di atas limit, posisi lama tetap
-  di-close tapi entry baru **di-skip** (flat sampai flip berikutnya).
-- Setelah `entry_delay_max_seconds` tidak ada flip baru; posisi terakhir dipegang sampai
-  settlement (atau di-close `exit_on_reversal` bila masih `on`).
-- Konfirmasi waktu penting: tanpa itu harga yang berosilasi di sekitar open bisa memicu
-  puluhan flip (fee & API call menumpuk). Naikkan `flip_confirm_seconds` bila masih terlalu sering.
-
-Aktifkan lewat `/set flip_on_reversal on`.
-
-### Model eksekusi & PnL paper ("like a real")
-
-PnL dihitung **100% dari order fill real** — tidak ada odds flat/fallback.
-
-- Ambil **best bid/ask** live via `GET /v1/markets/{id}/quote`.
-- Beli UP (Yes) di `bestAsk.price`; beli DOWN (No) di `1 − bestBid.price`.
-- Fee diambil dari `feeRateBps` market.
-- **Jumlah share** = `stake / fill_price` (contoh: stake $1 di fill 52% → **1.9231 share**).
-- Menang → tiap share redeem **$1**, jadi profit `stake × (1/fill − 1)` (contoh **+$0.92**);
-  kalah → `−stake` (share hangus); push → `0`.
-
-Bot **butuh `api.key`** untuk mendapat fill. Tanpa fill live yang valid, entry **di-skip**
-(bukan jatuh ke odds flat) — persis akun real: tidak ada harga = tidak order.
-
-### Mendapatkan API key (untuk real fill)
-
-1. Buka **Developers → API** di account predict.fun (https://developers.predict.fun).
-2. Buat **API key**.
-3. Isi di `config.json` (`api.key`) atau env `PREDICTFUN_API_KEY`.
-4. Pastikan `api.real_fill` = `true` (default) agar fill real aktif.
-
-### Rate limit
-
-API client menghormati limit akun (default tier **basic**):
-
-| Kategori | Limit |
-|---|---|
-| General (markets, orderbook, quote) | 250 req/menit |
-| Trading (order placement/cancel) + burst | 500 req/menit, 40 req/detik |
-| Search | 120 req/menit |
-
-Bot pakai kategori **General** saja untuk fill (`/quote` + `/markets/{id}`), sangat
-ringan (~6 call per 5 menit). Limiter sliding-window menjaga tetap di bawah limit
-dengan aman, dan saat kena **429** bot log `rate-limited` lalu **skip** entry pada
-jendela itu — tidak pernah spam/retry liar. Nilai limit bisa disesuaikan di
-`api.rate_limits`.
-
-## Instalasi & menjalankan (lokal)
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-cp config.example.json config.json
-# isi "telegram.token" dengan token bot dari @BotFather
-python bot.py
+```json
+"time_entry": [210, 215],
+"entry_max_price": 1.0,
+"exit_on_reversal": false
 ```
 
-Bot juga membaca `PREDICTFUN_TELEGRAM_TOKEN` dan `PREDICTFUN_TELEGRAM_CHAT_ID`
-dari environment (menimpa `config.json`).
+> **Config lama masih dikenali**: jika `config.json` lama memakai
+> `entry_delay_seconds`/`entry_delay_max_seconds`, bot otomatis menerjemahkannya ke
+> `time_entry`.
 
-## Daftar perintah Telegram
+## Perintah Telegram
 
 **Trading**
+
 | Perintah | Fungsi |
 |---|---|
 | `/trade on\|off` | mulai / berhenti trading |
@@ -123,10 +72,11 @@ dari environment (menimpa `config.json`).
 | `/sell <id>` | jual / tutup posisi manual |
 
 **Info**
+
 | Perintah | Fungsi |
 |---|---|
 | `/account` | balance, winrate, PnL hari ini |
-| `/stats` | statistik lengkap (per pair, streak, ROI) |
+| `/stats` | statistik lengkap (per pair, ROI, streak) |
 | `/history [N]` | riwayat trade (default 20) |
 | `/summary` | rekap harian (hari sebelumnya) |
 | `/config` | setting efektif + asal nilainya |
@@ -134,59 +84,67 @@ dari environment (menimpa `config.json`).
 | `/prices` | harga realtime BTC/ETH/BNB |
 
 **Notifikasi**
+
 | Perintah | Fungsi |
 |---|---|
 | `/notify full\|compact\|settle` | level notifikasi |
 
 **Config**
+
 | Perintah | Fungsi |
 |---|---|
-| `/set <kunci> <nilai>` | ubah konfigurasi |
-| `/set` | daftar kunci + contoh |
+| `/set <kunci> <nilai>` | ubah konfigurasi (daftar kunci: kirim /set) |
 
-Kunci yang bisa diubah (`/set`):
+Kunci `/set` utama:
 
 ```
 trading.enabled        → on|off
 trading.coins          → btc,eth,bnb
 trading.stake          → USDT per trade (> 0)
 trading.min_balance    → saldo minimum (>= 0)
-entry_delay_seconds    → delay entry setelah open (0..120)
-entry_delay_max_seconds → maks tunggu fill sesuai entry_max_price (0..120)
-entry_max_price        → maks fill price 0..1 (1.0 = nonaktif)
-exit_on_reversal       → on|off  (close posisi saat harga balik melewati open)
-flip_on_reversal       → on|off  (reverse posisi tiap harga flip melewati open)
-flip_confirm_seconds   → konfirmasi sisi baru sebelum flip (0..30 detik)
+time_entry             → start,end (contoh: 1,10)
+entry_max_price        → angka 0..1 (1.0 = nonaktif)
+exit_on_reversal       → on|off
 telegram.style         → HTML | MarkdownV2
-notify.level           → full | compact | settle
-notify.startup         → on|off
-notify.daily_summary   → on|off  (rekap harian otomatis)
-notify.daily_summary_time → HH:MM (UTC, default 00:05)
-api.real_fill          → on|off  (butuh api.key)
-mode                   → paper | live  (live belum tersedia)
+notify.*               → level/startup/daily_summary/daily_summary_time
+api.real_fill          → on|off (butuh api.key)
+mode                   → paper | live (live belum tersedia)
 ```
 
-Contoh: `/set trading.stake 25`, `/set trading.coins btc,eth`, `/set notify.level compact`.
+## Backtest
 
-## Struktur proyek
+Folder `backtest/` berisi script & data backtest — **lokal saja** (tidak di-push ke
+GitHub, sudah di `.gitignore`).
 
+Isi:
+- `download_data.py` — unduh tick 1 detik Binance (data.binance.vision, publik).
+- `backtest.py` — simulasi strategi + parameter sweep (450 kombinasi).
+- `data/` — CSV tick 1s BTC/ETH/BNB (1 hari = 86.400 detik per coin).
+- `report.md` + `results.csv` — hasil sweep.
+
+Cara pakai:
+
+```bash
+cd backtest
+python download_data.py 2026-11-11   # tanggal bebas (YYYY-MM-DD)
+python backtest.py 2026-11-11
 ```
-bot.py                  # entry point
-predictbot/
-  config.py             # load/save/validasi + origin tracking
-  db.py                 # SQLite (trades, saldo, balance events)
-  market.py             # jadwal window & slug market (slug = open time)
-  predictfun.py         # fetch startPrice/endPrice Chainlink dari halaman market
-  prices.py             # feed Binance WebSocket (realtime mid, fallback endpoint)
-  engine.py             # engine paper trading + strategi + settlement
-  telegram.py           # transport Telegram Bot API (long polling)
-  format.py             # formatting HTML / MarkdownV2
-  logger.py             # logging ke data/bot.log
-config.example.json
-requirements.txt
-deploy/predictfun.service
-data/                   # dibuat otomatis: bot.log, predictbot.db
-```
+
+Hasil 1 hari (2026-11-11, stake $1, fee 2% + spread 2 sen):
+
+| Config | Trades | Winrate | PnL/hari |
+|---|---|---|---|
+| `time_entry [210,215]`, mp 1.0, exit off | 821 | 86% | **+$46.11** |
+| `time_entry [45,50]`, mp 1.0, exit off | 854 | 66% | +$37.34 |
+
+Pola yang terbaca: **entry menit ke-3.5 mengikuti sisi unggul** (trend persistence —
+sisi unggul di detik 210 menang ~86–89% di data) dan **tanpa early-exit**. Config
+`entry_max_price 0.55` + entry awal (detik 5) justru **terburuk (−$37..−$43/hari)** —
+persis kombinasi yang barusan jelek di VPS live kamu.
+
+**Catatan jujur**: fill dimodelkan dari volatilitas + spread asumsi (order book
+historis predict.fun tidak tersedia), jadi angka ini indikasi arah — validasi live
+dengan stake kecil dulu. Detail asumsi: `backtest/report.md`.
 
 ## Deploy dengan systemd (Linux server)
 
@@ -196,32 +154,27 @@ sudo cp -r . /opt/predictfun
 cd /opt/predictfun
 sudo python3 -m venv .venv
 sudo .venv/bin/pip install -r requirements.txt
-sudo cp config.example.json config.json && sudo editor config.json   # isi token
+sudo cp config.example.json config.json && sudo editor config.json   # isi token + api.key
 
 sudo useradd -r -s /usr/sbin/nologin predictfun 2>/dev/null || true
 sudo cp deploy/predictfun.service /etc/systemd/system/predictfun.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now predictfun
-sudo systemctl status predictfun
-
 tail -f /opt/predictfun/data/bot.log
 ```
 
-Update kode di server: `cd /opt/predictfun && git pull && sudo systemctl restart predictfun`.
+Update: `cd /opt/predictfun && git pull && sudo systemctl restart predictfun`.
 
 ## Catatan teknis
 
-- **Sumber harga open/close**: diambil dari `startPrice`/`endPrice` (Chainlink) yang
-  ter-embed di halaman publik `predict.fun/market/<slug>` — tanpa API key.
-- **Sumber harga live**: Binance `bookTicker` mid (sama seperti stream Chainlink yang
-  dipakai predict.fun), dengan fallback otomatis antar endpoint.
-- **Slug market**: `<coin>-updown-5m-<open_ts>` (waktu **buka**, bukan tutup), contoh
-  `btc-updown-5m-1794397200`. Tautan deep-link disertakan di tiap notifikasi.
-- **API pakai numeric `marketId`**, bukan slug: id diambil dari `marketData` di
-  halaman publik (`marketId`), lalu dipakai di `/v1/markets/{id}/quote` dan
-  `/v1/markets/{id}`.
-- **User-Agent browser**: `api.predict.fun` di belakang Cloudflare (error 1010)
-  memblokir User-Agent bot, jadi client memakai signature browser desktop.
-- **Settlement**: menunggu `endPrice` terbit sampai `SETTLE_GRACE` (90s); jika belum
-  ada (mis. CDN lambat), fallback ke Binance mid saat close.
+- **Slug market**: `<coin>-updown-5m-<open_ts>` (waktu **buka**), contoh
+  `btc-updown-5m-1794397200`. Open/close diambil dari halaman publik predict.fun
+  (tanpa API key) — embed `marketData` berisi `startPrice`/`endPrice` + numeric
+  `marketId` yang dipakai endpoint `/v1/markets/{id}/quote`.
+- **User-Agent browser**: `api.predict.fun` di belakang Cloudflare (error 1010) memblokir
+  UA bot, jadi client memakai signature browser desktop.
+- **Settlement**: menunggu `endPrice` terbit sampai `SETTLE_GRACE` (90s); fallback ke
+  Binance mid saat close.
 - **Restart aman**: posisi OPEN dimuat ulang; yang sudah lewat grace ditandai `UNRESOLVED`.
+- **`time_entry` & resolusi**: window 5m = `[t0, t0+300)`. `time_entry[1]` maksimal 299
+  supaya selalu ada waktu sebelum close.

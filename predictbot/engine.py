@@ -1,9 +1,11 @@
 """Paper-trading engine.
 
 Strategy (as specified):
-    * wait ``entry_delay_seconds`` (default 1) after the 5-minute market opens,
+    * wait ``time_entry[0]`` seconds after the 5-minute market opens,
     * if the live price is above the open price -> enter UP,
-    * if it is below the open price -> enter DOWN.
+    * if it is below the open price -> enter DOWN,
+    * if the fill is pricier than ``entry_max_price``, keep re-quoting until
+      ``time_entry[1]``; past that deadline the entry is dropped.
 
 Pricing is anchored to predict.fun's real data:
     * the authoritative **open** price is predict.fun's ``startPrice`` (Chainlink),
@@ -84,10 +86,10 @@ class Engine:
     async def run(self) -> None:
         self._stop.clear()
         await self.start()
+        t_start, t_end = self._entry_window()
         log.info(
-            "Engine started (stake=%.4f, delay=%.1fs, coins=%s)",
-            self.cfg["trading"]["stake"],
-            self.cfg["entry_delay_seconds"],
+            "Engine started (stake=%.4f, entry window=%ds..%ds, coins=%s)",
+            self.cfg["trading"]["stake"], t_start, t_end,
             ",".join(self.cfg["trading"]["coins"]),
         )
         while not self._stop.is_set():
@@ -101,15 +103,23 @@ class Engine:
     def stop(self) -> None:
         self._stop.set()
 
-    # ── tick ────────────────────────────────────────────────────────────────
+# ── tick ────────────────────────────────────────────────────────────────
     async def _tick(self, now: float) -> None:
         open_ts = mkt.window_open(now)
         close_ts = open_ts + mkt.WINDOW_SECONDS
         await self._capture_and_entry(now, open_ts, close_ts)
-        await self._monitor_flips(now, open_ts, close_ts)
         await self._monitor_exits(now)
         await self._settle(now)
         self._prune(open_ts)
+
+    def _entry_window(self) -> tuple[float, float]:
+        """``(start, end)`` seconds after open when entries may happen."""
+        te = self.cfg.get("time_entry") or [1.0, 10.0]
+        try:
+            start, end = float(te[0]), float(te[1])
+        except (TypeError, ValueError, IndexError):
+            start, end = 1.0, 10.0
+        return start, max(start, end)
 
     async def _capture_and_entry(self, now: float, open_ts: int, close_ts: int) -> None:
         coins = [c for c in self.cfg["trading"]["coins"] if c in COIN_SYMBOLS]
@@ -126,14 +136,14 @@ class Engine:
             captured.add(coin)
             self._pending[key] = {"open_ts": open_ts, "local_open": local_open, "start_price": None}
 
-        # Phase 2: decide direction at open + delay, then open the paper trade.
-        # If the fill for that direction is more expensive than ``entry_max_price``,
-        # keep re-quoting until ``entry_delay_max_seconds`` hoping for a cheaper
-        # fill; at the deadline the entry is dropped (like an unfilled limit order).
-        delay = float(self.cfg["entry_delay_seconds"])
-        max_delay = max(delay, float(self.cfg.get("entry_delay_max_seconds", delay)))
+        # Phase 2: decide direction at open + time_entry[0], then open the paper
+        # trade. If the fill for that direction is more expensive than
+        # ``entry_max_price``, keep re-quoting until ``time_entry[1]`` hoping for a
+        # cheaper fill; at that deadline the entry is dropped (like an unfilled
+        # limit order).
+        start_s, end_s = self._entry_window()
         max_price = float(self.cfg.get("entry_max_price", 1.0))
-        due = [k for k, p in self._pending.items() if now >= p["open_ts"] + delay]
+        due = [k for k, p in self._pending.items() if now >= p["open_ts"] + start_s]
         if not due:
             return
 
@@ -142,12 +152,7 @@ class Engine:
         if need_enrich:
             await self._enrich_start_prices(need_enrich)
 
-        # In flip mode, entries are handled continuously by _monitor_flips
-        # (reverse on each confirmed cross), so skip the one-shot entry here.
-        if self.cfg.get("flip_on_reversal", False):
-            return
-
-        # Decide direction once per coin (the signal is the open+delay instant).
+        # Decide direction once per coin (the signal is the open+start instant).
         stake = float(self.cfg["trading"]["stake"])
         for key in list(due):
             info = self._pending.get(key)
@@ -207,7 +212,7 @@ class Engine:
                 self._pending.pop(key, None)
                 continue
             if fp > max_price:
-                if now < info["open_ts"] + max_delay:
+                if now < info["open_ts"] + end_s:
                     continue  # still too expensive — keep waiting for a cheaper quote
                 log.info("Skipping %s 5m %s: fill %.4f above max %.4f at deadline",
                          coin, direction, fp, max_price)
@@ -334,16 +339,9 @@ class Engine:
         """
         if not self.cfg.get("exit_on_reversal", True):
             return
-        # During the flip entry window, _monitor_flips owns the position (it
-        # closes+reopens on each confirmed cross), so don't double-handle here.
-        flip_on = self.cfg.get("flip_on_reversal", False)
-        _d = float(self.cfg["entry_delay_seconds"])
-        flip_max_delay = max(_d, float(self.cfg.get("entry_delay_max_seconds", _d)))
         for trade_id, trade in list(self._open.items()):
             direction = trade.get("direction")
             if direction not in ("UP", "DOWN"):
-                continue
-            if flip_on and now < float(trade["open_ts"]) + flip_max_delay:
                 continue
             open_price = float(trade.get("open_price") or 0.0)
             if open_price <= 0:
@@ -402,99 +400,6 @@ class Engine:
             coin.upper(), direction, trade["market_slug"], live_price, exit_price, shares, pnl, balance,
         )
         self._emit("exit", result)
-
-    # ── flip on reversal (stop-and-reverse scalping) ────────────────────────
-    async def _monitor_flips(self, now: float, open_ts: int, close_ts: int) -> None:
-        """Flip mode: reverse the position on each confirmed cross of the open price.
-
-        Runs every tick during ``[open+delay, open+max_delay]``.  A cross only
-        counts after the price has held the new side for ``flip_confirm_seconds``
-        (time confirmation, to filter noise).  On a confirmed flip the existing
-        position is sold at market and a new one is opened in the new direction
-        (subject to ``entry_max_price`` and balance).
-        """
-        if not self.cfg.get("flip_on_reversal", False):
-            return
-        delay = float(self.cfg["entry_delay_seconds"])
-        max_delay = max(delay, float(self.cfg.get("entry_delay_max_seconds", delay)))
-        confirm = float(self.cfg.get("flip_confirm_seconds", 1.0))
-        coins = [c for c in self.cfg["trading"]["coins"] if c in COIN_SYMBOLS]
-        for coin in coins:
-            key = (coin, close_ts)
-            info = self._pending.get(key)
-            if info is None:
-                continue
-            open_price = info["start_price"] if info["start_price"] else info["local_open"]
-            if open_price <= 0:
-                continue
-            live = self.feed.latest(coin)
-            if live <= 0:
-                continue
-            if now - self.feed.last_update(coin) > FEED_STALE_SECONDS:
-                continue
-            side = "UP" if live > open_price else ("DOWN" if live < open_price else None)
-            if side is None:
-                continue
-            # Time confirmation: the price must hold this side for `confirm` seconds.
-            if side != info.get("_raw_side"):
-                info["_raw_side"] = side
-                info["_raw_since"] = now
-            if now - info.get("_raw_since", now) < confirm:
-                continue
-            if info.get("_confirmed_side") == side:
-                continue  # already flipped to this side
-            # Only act inside the entry window.
-            if now < info["open_ts"] + delay or now > info["open_ts"] + max_delay:
-                continue
-            info["_confirmed_side"] = side
-            await self._do_flip(coin, key, info, side, open_price, live)
-
-    async def _do_flip(self, coin: str, key: tuple[str, int], info: dict[str, Any],
-                       side: str, open_price: float, live: float) -> None:
-        """Close the current position (if any) and open one in ``side``."""
-        open_ts = info["open_ts"]
-        close_ts = key[1]
-        existing = None
-        for tid, t in list(self._open.items()):
-            if t["coin"] == coin and t["close_ts"] == close_ts:
-                existing = (tid, t)
-                break
-        if existing:
-            tid, t = existing
-            if t.get("direction") == side:
-                return  # already aligned; nothing to flip
-            await self._exit_reversal(tid, t, live)
-        await self._enter_direction(coin, open_ts, close_ts, open_price, side)
-
-    async def _enter_direction(self, coin: str, open_ts: int, close_ts: int,
-                               open_price: float, direction: str) -> bool:
-        """Fetch a live fill and open a position in ``direction`` (flip entry).
-
-        Respects ``entry_max_price`` and balance limits.  Returns True if placed.
-        """
-        stake = float(self.cfg["trading"]["stake"])
-        if not self._can_open(stake):
-            log.info("Flip skip %s %s: balance limit reached", coin, direction)
-            return False
-        fill = await self.predfun.fill_for(coin, open_ts)
-        if not fill:
-            log.warning("Flip skip %s %s: no real fill available", coin, direction)
-            return False
-        fp = fill["fill_up"] if direction == "UP" else fill["fill_down"]
-        if not (isinstance(fp, (int, float)) and 0.0 < fp < 1.0):
-            log.warning("Flip skip %s %s: invalid fill price %r", coin, direction, fp)
-            return False
-        max_price = float(self.cfg.get("entry_max_price", 1.0))
-        if fp > max_price:
-            log.info("Flip skip %s %s: fill %.4f above max %.4f", coin, direction, fp, max_price)
-            return False
-        entry_price = self.feed.latest(coin)
-        fill_price = float(fp)
-        odds = 1.0 / fill_price
-        fee_bps = fill.get("fee_bps")
-        self._place_trade(coin, open_ts, close_ts, open_price, entry_price,
-                          direction, stake, odds, fill_price, fee_bps)
-        return True
 
     def sell(self, trade_id: int, price: float | None = None) -> tuple[Optional[dict], Optional[str]]:
         """Manually close an open position now (used by /sell)."""

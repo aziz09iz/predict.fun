@@ -18,3 +18,6 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Backtest (local only — data & hasil tidak dipublish ke repo)
+backtest/

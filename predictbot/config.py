@@ -48,12 +48,9 @@ DEFAULTS: dict[str, Any] = {
         "stake": 1.0,             # USDT risked per trade
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
-    "entry_delay_seconds": 1,     # decide direction 1s after market open
-    "entry_delay_max_seconds": 10,  # max wait for a fill within the price limit
-    "entry_max_price": 0.55,   # max fill (0..1); 1.0 disables the limit
-    "exit_on_reversal": True,  # close early if price crosses back over the open price
-    "flip_on_reversal": False, # on each confirmed cross of open: close + reopen opposite
-    "flip_confirm_seconds": 1.0,  # price must hold the new side this long before flipping
+    "time_entry": [1.0, 10.0],    # entry window [start, end] seconds after open
+    "entry_max_price": 0.55,      # max fill (0..1); 1.0 disables the limit
+    "exit_on_reversal": True,     # close early if price crosses back over the open price
     "notify": {
         "level": "full",          # "full" | "compact" | "settle"
         "startup": True,
@@ -121,6 +118,14 @@ def load_config_state() -> tuple[dict[str, Any], dict[str, Any]]:
             raw = {}
         cfg = _deep_merge(cfg, raw)
         origins = _merge_origins(origins, raw, ORIGIN_FILE)
+        # Legacy mapping: config.json written before ``time_entry`` used the
+        # ``entry_delay_seconds``/``entry_delay_max_seconds`` pair.  Translate it
+        # so an old VPS config keeps behaving the same after the upgrade.
+        if "time_entry" not in raw and isinstance(raw.get("entry_delay_seconds"), (int, float)):
+            start = float(raw["entry_delay_seconds"])
+            end = float(raw.get("entry_delay_max_seconds", start))
+            cfg["time_entry"] = [start, max(start, end)]
+            origins["time_entry"] = ORIGIN_FILE
 
     token = os.environ.get("PREDICTFUN_TELEGRAM_TOKEN", "").strip()
     if token:
@@ -182,12 +187,9 @@ SETTABLE_KEYS = [
     ("trading.coins", "btc,eth,bnb", "subset coin (pisah koma)"),
     ("trading.stake", "angka", "USDT per trade (> 0)"),
     ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
-    ("entry_delay_seconds", "angka", "delay entry setelah open (0..120)"),
-    ("entry_delay_max_seconds", "angka", "maks tunggu fill sesuai entry_max_price (0..120)"),
+    ("time_entry", "start,end", "jendela entry: detik mulai & batas setelah open (contoh 1,10)"),
     ("entry_max_price", "angka", "maks fill price 0..1 (1.0 = nonaktif)"),
     ("exit_on_reversal", "on|off", "close posisi saat harga balik melewati open price"),
-    ("flip_on_reversal", "on|off", "reverse (close+buka baru) tiap harga flip melewati open"),
-    ("flip_confirm_seconds", "angka", "konfirmasi sisi baru sebelum flip (0..30 detik)"),
     ("telegram.style", "HTML|MarkdownV2", "format pesan"),
     ("notify.level", "full|compact|settle", "level notifikasi"),
     ("notify.startup", "on|off", "pesan start saat boot"),
@@ -205,10 +207,21 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     """
     v = raw_value.strip()
     if dotted in ("trading.enabled", "notify.startup", "api.real_fill", "notify.daily_summary",
-                  "exit_on_reversal", "flip_on_reversal"):
+                  "exit_on_reversal"):
         if v.lower() not in _BOOLS:
             return False, None, "Gunakan `on` atau `off`"
         return True, _BOOLS[v.lower()], None
+    if dotted == "time_entry":
+        parts = [p for p in v.replace(",", " ").split() if p]
+        if len(parts) != 2:
+            return False, None, "Format: start,end (contoh: 1,10)"
+        try:
+            start, end = float(parts[0]), float(parts[1])
+        except ValueError:
+            return False, None, "time_entry harus dua angka (detik)"
+        if not (0 <= start <= end <= 299):
+            return False, None, "Rentang 0..299 detik, dan start <= end"
+        return True, [start, end], None
     if dotted == "trading.coins":
         coins = [c.strip().lower() for c in v.replace(",", " ").split() if c.strip()]
         bad = [c for c in coins if c not in ALL_COINS]
@@ -217,8 +230,7 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
         if not coins:
             return False, None, "Minimal satu coin (btc,eth,bnb)"
         return True, coins, None
-    if dotted in ("trading.stake", "trading.min_balance", "entry_delay_seconds",
-                  "entry_delay_max_seconds", "entry_max_price", "flip_confirm_seconds"):
+    if dotted in ("trading.stake", "trading.min_balance", "entry_max_price"):
         try:
             val = float(v)
         except ValueError:
@@ -227,14 +239,8 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
             return False, None, "Stake harus > 0"
         if dotted == "trading.min_balance" and val < 0:
             return False, None, "Tidak boleh negatif"
-        if dotted == "entry_delay_seconds" and not (0 <= val <= 120):
-            return False, None, "Delay antara 0 dan 120 detik"
-        if dotted == "entry_delay_max_seconds" and not (0 <= val <= 120):
-            return False, None, "Delay maks antara 0 dan 120 detik"
         if dotted == "entry_max_price" and not (0.0 < val <= 1.0):
             return False, None, "max_price antara 0 dan 1 (1.0 = nonaktif)"
-        if dotted == "flip_confirm_seconds" and not (0 <= val <= 30):
-            return False, None, "Konfirmasi flip antara 0 dan 30 detik"
         return True, val, None
     if dotted == "telegram.style":
         s = v.lower()

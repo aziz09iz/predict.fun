@@ -6,7 +6,8 @@ Run with ``python bot.py``.  The bot:
      resolves its crypto markets against),
   2. anchors open/close to predict.fun's real Chainlink ``startPrice``/``endPrice``,
   3. for each 5-minute Up/Down window, enters UP if live > open else DOWN at
-     ``open + entry_delay_seconds``,
+     ``open + time_entry[0]``, waiting up to ``time_entry[1]`` for a fill within
+     ``entry_max_price``,
   4. settles against predict.fun's actual resolution data,
   5. exposes control + status through a Telegram bot.
 
@@ -71,12 +72,9 @@ CONFIG_ROWS = [
     "trading.coins",
     "trading.stake",
     "trading.min_balance",
-    "entry_delay_seconds",
-    "entry_delay_max_seconds",
+    "time_entry",
     "entry_max_price",
     "exit_on_reversal",
-    "flip_on_reversal",
-    "flip_confirm_seconds",
     "telegram.style",
     "notify.level",
     "notify.startup",
@@ -89,7 +87,7 @@ def _display_value(v: Any) -> str:
     if isinstance(v, bool):
         return "on" if v else "off"
     if isinstance(v, list):
-        return ", ".join(v)
+        return ", ".join(f"{x:g}" if isinstance(x, (int, float)) else str(x) for x in v)
     if isinstance(v, float):
         return str(int(v)) if v.is_integer() else f"{v:g}"
     if v is None or v == "":
