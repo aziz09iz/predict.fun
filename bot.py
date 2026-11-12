@@ -6,8 +6,8 @@ Run with ``python bot.py``.  The bot:
      resolves its crypto markets against),
   2. anchors open/close to predict.fun's real Chainlink ``startPrice``/``endPrice``,
   3. for each 5-minute Up/Down window, enters UP if live > open else DOWN at
-     ``open + time_entry[0]``, waiting up to ``time_entry[1]`` for a fill within
-     ``entry_max_price``,
+     ``open + per_coin[coin].time_entry[0]``, waiting up to ``time_entry[1]`` for
+     a fill within ``entry_max_price`` (all per coin),
   4. settles against predict.fun's actual resolution data,
   5. exposes control + status through a Telegram bot.
 
@@ -71,9 +71,6 @@ CONFIG_ROWS = [
     "trading.enabled",
     "trading.stake",
     "trading.min_balance",
-    "time_entry",
-    "entry_max_price",
-    "exit_on_reversal",
     "notify.level",
     "notify.daily_summary",
     "notify.daily_summary_time",

@@ -29,6 +29,14 @@ COIN_SYMBOLS = {
 }
 ALL_COINS = list(COIN_SYMBOLS)
 
+# Code-level fallback for strategy params (used when a coin's per_coin block is
+# missing or incomplete).  Not user-facing config — per_coin is the single source.
+FALLBACK_STRATEGY = {
+    "time_entry": [1.0, 10.0],
+    "entry_max_price": 1.0,
+    "exit_on_reversal": True,
+}
+
 # Value origin labels shown by /config.
 ORIGIN_DEFAULT = "default"
 ORIGIN_FILE = "file"
@@ -46,11 +54,9 @@ DEFAULTS: dict[str, Any] = {
         "stake": 1.0,             # USDT risked per trade
         "min_balance": 0.0,       # stop opening trades below this cash level
     },
-    "time_entry": [1.0, 10.0],    # entry window [start, end] seconds after open
-    "entry_max_price": 0.55,      # max fill (0..1); 1.0 disables the limit
-    "exit_on_reversal": True,     # close early if price crosses back over the open price
-    # Per-coin overrides (best params per coin, from the 1-day backtest). Any key
-    # omitted here falls back to the global value above.
+    # Per-coin strategy config — satu-satunya tempat parameter strategi.
+    # Best params per coin dari backtest (2026-11-11); key yang hilang di sebuah
+    # coin memakai FALLBACK_STRATEGY di bawah.
     "per_coin": {
         "btc": {"time_entry": [45.0, 165.0], "entry_max_price": 0.65, "exit_on_reversal": False},
         "eth": {"time_entry": [10.0, 15.0], "entry_max_price": 0.65, "exit_on_reversal": False},
@@ -122,15 +128,31 @@ def load_config_state() -> tuple[dict[str, Any], dict[str, Any]]:
             raw = {}
         cfg = _deep_merge(cfg, raw)
         origins = _merge_origins(origins, raw, ORIGIN_FILE)
-        # Legacy mapping: config.json written before ``time_entry`` used the
-        # ``entry_delay_seconds``/``entry_delay_max_seconds`` pair.  Translate it
-        # so an old VPS config keeps behaving the same after the upgrade.
-        if "time_entry" not in raw and isinstance(raw.get("entry_delay_seconds"), (int, float)):
+        # Legacy mapping 1: the old global strategy keys (and the even older
+        # ``entry_delay_seconds``/``entry_delay_max_seconds`` pair) move into
+        # every coin's per_coin block, so an old config keeps its behaviour.
+        old_te = raw.get("time_entry")
+        if old_te is None and isinstance(raw.get("entry_delay_seconds"), (int, float)):
             start = float(raw["entry_delay_seconds"])
             end = float(raw.get("entry_delay_max_seconds", start))
-            cfg["time_entry"] = [start, max(start, end)]
-            origins["time_entry"] = ORIGIN_FILE
-        # Legacy mapping: the removed ``trading.coins`` list becomes per-coin
+            old_te = [start, max(start, end)]
+        old_mp = raw.get("entry_max_price")
+        old_exit = raw.get("exit_on_reversal")
+        if (old_te is not None or old_mp is not None
+                or isinstance(old_exit, bool)) and "per_coin" not in raw:
+            for c in ALL_COINS:
+                blk = cfg.setdefault("per_coin", {}).setdefault(c, {})
+                og = origins.setdefault("per_coin", {}).setdefault(c, {})
+                if old_te is not None:
+                    blk["time_entry"] = old_te
+                    og["time_entry"] = ORIGIN_FILE
+                if isinstance(old_mp, (int, float)):
+                    blk["entry_max_price"] = float(old_mp)
+                    og["entry_max_price"] = ORIGIN_FILE
+                if isinstance(old_exit, bool):
+                    blk["exit_on_reversal"] = old_exit
+                    og["exit_on_reversal"] = ORIGIN_FILE
+        # Legacy mapping 2: the removed ``trading.coins`` list becomes per-coin
         # ``enabled`` toggles — coins NOT listed in the old config are disabled.
         old_coins = (raw.get("trading") or {}).get("coins")
         if isinstance(old_coins, list):
@@ -197,13 +219,9 @@ _BOOLS = {"on": True, "off": False, "true": True, "false": False, "1": True, "0"
 
 # Curated, human-readable list for `/set` without arguments.
 SETTABLE_KEYS = [
-    ("trading.enabled", "on|off", "hidup/mati trading"),
     ("trading.enabled", "on|off", "hidup/mati trading semua coin"),
     ("trading.stake", "angka", "USDT per trade (> 0)"),
     ("trading.min_balance", "angka", "saldo minimum (>= 0)"),
-    ("time_entry", "start,end", "jendela entry: detik mulai & batas setelah open (contoh 1,10)"),
-    ("entry_max_price", "angka", "maks fill price 0..1 (1.0 = nonaktif)"),
-    ("exit_on_reversal", "on|off", "close posisi saat harga balik melewati open price"),
     ("per_coin.btc.time_entry", "start,end", "jendela entry khusus BTC (contoh 45,165)"),
     ("per_coin.eth.entry_max_price", "angka", "maks fill khusus ETH (0..1)"),
     ("per_coin.bnb.exit_on_reversal", "on|off", "exit-on-reversal khusus BNB"),
@@ -223,6 +241,9 @@ def validate_setting(dotted: str, raw_value: str) -> tuple[bool, Any, str | None
     a stray message cannot poison the running bot.
     """
     v = raw_value.strip()
+    # Direct global strategy keys no longer exist — per_coin is the single source.
+    if dotted in ("time_entry", "entry_max_price", "exit_on_reversal"):
+        return False, None, "Pakai per_coin.<coin>.<kunci> (contoh: /set per_coin.btc.time_entry 1,10)"
     # per-coin override: per_coin.<coin>.<enabled|time_entry|entry_max_price|exit_on_reversal>
     if dotted.startswith("per_coin."):
         parts = dotted.split(".")

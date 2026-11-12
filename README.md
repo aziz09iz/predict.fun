@@ -38,10 +38,7 @@ Semua di `config.json` (lihat `config.example.json`) dan bisa diubah live via Te
 | `trading.enabled` | `true` | hidup/mati trading **semua** coin (master switch) |
 | `trading.stake` | `1.0` | USDT per trade |
 | `trading.min_balance` | `0.0` | berhenti entry jika saldo di bawah ini |
-| `time_entry` | `[1, 10]` | **jendela entry**: `[mulai, batas]` detik setelah open |
-| `entry_max_price` | `0.55` | harga fill maksimal 0–1 (`1.0` = nonaktif) |
-| `exit_on_reversal` | `true` | close posisi saat harga balik melewati open |
-| `per_coin.<coin>.*` | lihat bawah | override per coin: `enabled` (on/off), `time_entry`, `entry_max_price`, `exit_on_reversal` |
+| `per_coin.<coin>.*` | lihat bawah | **parameter strategi per coin**: `enabled` (on/off), `time_entry`, `entry_max_price`, `exit_on_reversal` |
 | `notify.*` | — | level notifikasi + rekap harian otomatis |
 | `api.key` / `api.real_fill` | — | API key predict.fun (wajib untuk fill real) |
 | `api.rate_limits` | basic tier | limit request (250/min general, dll.) |
@@ -50,21 +47,24 @@ Semua di `config.json` (lihat `config.example.json`) dan bisa diubah live via Te
 Contoh config strategi (hasil backtest 1 hari, lihat bagian Backtest):
 
 ```json
-"time_entry": [210, 215],
-"entry_max_price": 1.0,
-"exit_on_reversal": false
+"per_coin": {
+  "btc": {"time_entry": [45, 165], "entry_max_price": 0.65, "exit_on_reversal": false},
+  "eth": {"time_entry": [10, 15], "entry_max_price": 0.65, "exit_on_reversal": false},
+  "bnb": {"time_entry": [20, 35], "entry_max_price": 0.52, "exit_on_reversal": false}
+}
 ```
 
-> **Config lama masih dikenali**: jika `config.json` lama memakai
-> `entry_delay_seconds`/`entry_delay_max_seconds`, bot otomatis menerjemahkannya ke
-> `time_entry`.
+> **Config lama masih dikenali**: key lama (`entry_delay_seconds`,
+> `entry_delay_max_seconds`, global `time_entry`/`entry_max_price`/`exit_on_reversal`,
+> `trading.coins`) otomatis diterjemahkan ke `per_coin` saat bot start.
 
 ### Setting per coin
 
-Setiap coin punya karakter berbeda, jadi **on/off** dan semua parameter strategi
-(`time_entry`, `entry_max_price`, `exit_on_reversal`) bisa diatur **khusus per coin**
-lewat `per_coin` (nilai di sini meng-override nilai global; key yang tidak diisi ikut
-nilai global):
+Semua parameter strategi hidup di **`per_coin`** — ini satu-satunya tempat setting
+strategi. Setiap coin punya karakter berbeda, jadi tiap coin mengatur dirinya sendiri:
+`enabled` (on/off), `time_entry` `[mulai, batas]` detik setelah open, `entry_max_price`
+(harga fill maksimal 0–1; `1.0` = tanpa limit), dan `exit_on_reversal` (close saat harga
+balik melewati open):
 
 ```json
 "per_coin": {
@@ -129,10 +129,8 @@ trading.enabled        → on|off
 trading.enabled        → on|off (master: semua coin)
 trading.stake          → USDT per trade (> 0)
 trading.min_balance    → saldo minimum (>= 0)
-time_entry             → start,end (contoh: 1,10)
-entry_max_price        → angka 0..1 (1.0 = nonaktif)
-exit_on_reversal       → on|off
-per_coin.<coin>.*      → override per coin: enabled / time_entry / entry_max_price / exit_on_reversal
+per_coin.<coin>.*      → parameter strategi per coin:
+                          enabled / time_entry / entry_max_price / exit_on_reversal
 notify.*               → level/daily_summary/daily_summary_time
 api.real_fill          → on|off (butuh api.key)
 mode                   → paper | live (live belum tersedia)

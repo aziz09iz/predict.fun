@@ -9,9 +9,6 @@
     "stake": 1.0,
     "min_balance": 0.0
   },
-  "time_entry": [1.0, 10.0],
-  "entry_max_price": 0.55,
-  "exit_on_reversal": true,
   "per_coin": {
     "btc": {"enabled": true, "time_entry": [45, 165], "entry_max_price": 0.65, "exit_on_reversal": false},
     "eth": {"enabled": true, "time_entry": [10, 15], "entry_max_price": 0.65, "exit_on_reversal": false},

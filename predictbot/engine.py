@@ -23,7 +23,7 @@ import time
 from typing import Any, Callable, Optional
 
 from . import market as mkt
-from .config import COIN_SYMBOLS
+from .config import COIN_SYMBOLS, FALLBACK_STRATEGY
 from .db import Database
 from .prices import PriceFeed
 from .predictfun import PredictFun
@@ -118,20 +118,20 @@ class Engine:
         self._prune(open_ts)
 
     def _coin_cfg(self, coin: str) -> dict:
-        """Effective strategy params for one coin (per-coin override > global)."""
+        """Effective strategy params for one coin (per_coin config > code fallback)."""
+        fb = FALLBACK_STRATEGY
         over = self.cfg.get("per_coin", {}).get(coin) or {}
-        te = over.get("time_entry") or self.cfg.get("time_entry") or [1.0, 10.0]
+        te = over.get("time_entry") or fb["time_entry"]
         try:
             start, end = float(te[0]), float(te[1])
         except (TypeError, ValueError, IndexError):
-            start, end = 1.0, 10.0
+            start, end = float(fb["time_entry"][0]), float(fb["time_entry"][1])
         return {
             "enabled": bool(over.get("enabled", True)),
             "start": start,
             "end": max(start, end),
-            "max_price": float(over.get("entry_max_price", self.cfg.get("entry_max_price", 1.0))),
-            "exit_on_reversal": bool(over.get("exit_on_reversal",
-                                              self.cfg.get("exit_on_reversal", True))),
+            "max_price": float(over.get("entry_max_price", fb["entry_max_price"])),
+            "exit_on_reversal": bool(over.get("exit_on_reversal", fb["exit_on_reversal"])),
         }
 
     async def _capture_and_entry(self, now: float, open_ts: int, close_ts: int) -> None:
