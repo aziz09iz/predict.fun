@@ -16,6 +16,8 @@
   "entry_delay_max_seconds": 10,
   "entry_max_price": 0.55,
   "exit_on_reversal": true,
+  "flip_on_reversal": false,
+  "flip_confirm_seconds": 1.0,
   "notify": {
     "level": "full",
     "startup": true,

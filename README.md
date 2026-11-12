@@ -44,6 +44,22 @@ round berikutnya. PnL exit = `shares × exit_price − stake`, dengan `exit_pric
 sisi jual order book (UP → `bestBid`, DOWN → `1 − bestAsk`). Matikan lewat
 `/set exit_on_reversal off`.
 
+**Flip on reversal** (`flip_on_reversal`, default `off`) — mode *stop-and-reverse*:
+selama jendela entry `[open+entry_delay_seconds … open+entry_delay_max_seconds]`, setiap kali
+harga **menyeberang open price** dan **bertahan di sisi baru selama `flip_confirm_seconds`**
+(default 1 detik, filter anti-noise), bot **menutup posisi lama di harga pasar lalu membuka
+posisi arah baru** (reverse). Aturan:
+
+- Selalu maksimal **1 posisi per coin** (tidak pernah stack UP+DOWN).
+- `entry_max_price` tetap berlaku: kalau fill arah baru di atas limit, posisi lama tetap
+  di-close tapi entry baru **di-skip** (flat sampai flip berikutnya).
+- Setelah `entry_delay_max_seconds` tidak ada flip baru; posisi terakhir dipegang sampai
+  settlement (atau di-close `exit_on_reversal` bila masih `on`).
+- Konfirmasi waktu penting: tanpa itu harga yang berosilasi di sekitar open bisa memicu
+  puluhan flip (fee & API call menumpuk). Naikkan `flip_confirm_seconds` bila masih terlalu sering.
+
+Aktifkan lewat `/set flip_on_reversal on`.
+
 ### Model eksekusi & PnL paper ("like a real")
 
 PnL dihitung **100% dari order fill real** — tidak ada odds flat/fallback.
@@ -139,6 +155,8 @@ entry_delay_seconds    → delay entry setelah open (0..120)
 entry_delay_max_seconds → maks tunggu fill sesuai entry_max_price (0..120)
 entry_max_price        → maks fill price 0..1 (1.0 = nonaktif)
 exit_on_reversal       → on|off  (close posisi saat harga balik melewati open)
+flip_on_reversal       → on|off  (reverse posisi tiap harga flip melewati open)
+flip_confirm_seconds   → konfirmasi sisi baru sebelum flip (0..30 detik)
 telegram.style         → HTML | MarkdownV2
 notify.level           → full | compact | settle
 notify.startup         → on|off

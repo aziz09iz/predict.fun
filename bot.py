@@ -75,6 +75,8 @@ CONFIG_ROWS = [
     "entry_delay_max_seconds",
     "entry_max_price",
     "exit_on_reversal",
+    "flip_on_reversal",
+    "flip_confirm_seconds",
     "telegram.style",
     "notify.level",
     "notify.startup",
