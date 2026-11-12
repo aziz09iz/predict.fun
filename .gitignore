@@ -19,5 +19,5 @@ venv/
 Thumbs.db
 .DS_Store
 
-# Backtest (local only — data & hasil tidak dipublish ke repo)
-backtest/
+# Backtest: script & hasil dipublish, raw data tetap lokal
+backtest/data/
