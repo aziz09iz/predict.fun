@@ -1,55 +1,52 @@
 # Backtest — predict.fun 5m Up/Down (BTC/ETH/BNB)
 
-Folder ini **lokal saja** (di `.gitignore`, tidak di-push). Semua script & data
-backtest ada di sini.
+Folder ini **publik**, kecuali `data/` (gitignore — data tumbuh ±20 MB/hari).
 
-## Script
+## Status saat ini: MENGUMPULKAN DATA REAL
 
-| Script | Fungsi |
-|---|---|
-| `download_data.py` | unduh tick 1s Binance (arsip harian data.binance.vision; fallback REST `api.binance.com` jika arsip belum terbit, tahan gap data). Output: `data/{SYM}-1s-{date}.csv` |
-| `backtest.py` | simulasi strategi + sweep parameter. **Dua hari**: in-sample (pilih config) + out-of-sample (tes jujur, walk-forward σ). Output: `results.csv`, `report.md` |
-| `record_book.py` | **merekam data REAL predict.fun** via WebSocket `predictTopOfBook/{id}` — push per book-change (event-driven) + harga underlying (Binance bookTicker WS) di kolom `price`, plus full-depth REST snapshot di detik 0. Fallback otomatis ke REST polling 1/s jika WS gagal. Jalankan terus di VPS |
-| `eval_live.py` | evaluasi hasil live dari `data/predictbot.db` (upload dari VPS) |
+Order book historis predict.fun **tidak tersedia** (API hanya menyediakan snapshot
+terkini; timeseries `chance` praktis kosong — dicek langsung via OpenAPI spec
+`dev.predict.fun`). Satu-satunya jalan mendapat data real: **merekam sendiri**.
 
-## Temuan ketersediaan data predict.fun (dicek 13 Nov 2026)
+Backtest dengan model probabilitas (Φ + spread asumsi) sudah pernah dibuat dan
+**terbukti overfit 1 hari** — hasil live VPS (12 Nov: −$9.27, winrate 52.6% vs
+prediksi 61-67%) membuktikannya. Detail verifikasi ada di riwayat git
+(commit `46638d4`). Karena itu pipeline backtest lama dihapus dan akan **ditulis
+ulang berbasis data fill REAL** setelah perekaman selesai.
 
-- **Order book historis: TIDAK tersedia.** API hanya menyediakan snapshot terkini
-  (`/v1/markets/{id}/orderbook`, `/v1/markets/quotes`, `/v1/markets/orderbooks`).
-- **Timeseries `metric=chance` (probabilitas implisit)**: endpoint ada di spec, tapi
-  praktis kosong (0–1 poin per market). Retensi series/rounds juga cuma ±24 jam ke
-  belakang (rounds dipre-create 24h ke depan).
-- **Kesimpulan**: satu-satunya cara dapat data real = merekam sendiri mulai sekarang
-  → `record_book.py`.
+## Recorder — `record_book.py`
 
-## Recorder (penting!)
+Merekam data real per window 5 menit (btc/eth/bnb):
 
-```bash
-# di VPS (tmux / systemd):
-PREDICTFUN_API_KEY=... python record_book.py             # default btc,eth,bnb
-PREDICTFUN_API_KEY=... python record_book.py btc,bnb     # pilih coin tertentu
-
-# systemd (opsional):
-# [Service] ExecStart=/opt/predictfun/.venv/bin/python record_book.py btc,bnb
-# Environment=PREDICTFUN_API_KEY=...
-```
-
-Per window 5m: subscribe `predictTopOfBook/{marketId}` di `wss://ws.predict.fun/ws`
-(push setiap book berubah — event-driven), harga underlying di kolom `price`
-(Binance bookTicker WS), full-depth snapshot di detik 0.
-File: `data/predictfun-book-*.csv` + `predictfun-orderbook-*.jsonl`.
-Setelah beberapa hari berjalan, backtest bisa diganti dari model Φ ke **harga fill REAL**.
-
-Rate: WS = tanpa polling; fallback REST 1/s ≈ 60 req/menit (limit 250/menit).
-Folder `data/` TIDAK di-push (gitignore) — data tumbuh ±20 MB/hari.
-
-## Pemakaian backtest
+1. Resolve `marketId` tiap window via `/v1/series/{coin}-updown-5m/rounds`.
+2. Subscribe `predictTopOfBook/{marketId}` di `wss://ws.predict.fun/ws` — **push
+   setiap book berubah** (event-driven, bukan polling). Heartbeat di-echo otomatis.
+3. Harga underlying (Binance bookTicker WS, mid bid-ask) dicatat di kolom `price`.
+4. Sekali per window: snapshot **full-depth** via REST `/v1/markets/{id}/orderbook`.
+5. Fallback otomatis ke REST batch-quotes 1×/detik jika WS gagal.
 
 ```bash
-python download_data.py 2026-11-11          # + tanggal lain yang perlu
-python backtest.py 2026-11-11 2026-11-12    # <in-sample> <out-of-sample>
+# di VPS (tmux / systemd), jalankan terus:
+PREDICTFUN_API_KEY=... python record_book.py            # default btc,eth,bnb
+PREDICTFUN_API_KEY=... python record_book.py btc,bnb    # pilih coin
 ```
 
-Rule: 1 hari data per evaluasi, coin btc/eth/bnb, stake $1, fee 2% + spread 2 sen.
-Pilih config yang **robust** (profit di kedua hari). Baca `report.md` (ada glosarium +
-verifikasi model vs data live VPS 12 Nov: hanya BTC [45,165] mp0.65 yang terbukti).
+Output di `data/` per coin/hari:
+
+```
+predictfun-book-{coin}-{YYYY-MM-DD}.csv
+  ts_ms, sec, market_id, bid, ask, bid_size, ask_size, bid_down, ask_down, price
+  (bid/ask = sisi UP/Yes; bid_down = 1-bid, ask_down = 1-ask; price = mid Binance)
+predictfun-orderbook-{coin}-{YYYY-MM-DD}.jsonl   (full-depth, di detik 0)
+```
+
+Rate: WS push tanpa polling; fallback 1 req/detik ≈ 60 req/menit (limit 250/menit).
+
+## Setelah data terkumpul (rencana)
+
+1. `data/` berisi fill REAL (bid/ask per detik) + resolusi (close vs open dari
+   Binance 1s — bisa diunduh ulang kapan pun).
+2. Backtest ditulis ulang: entry di `time_entry[0]` pakai **ask real** untuk arah
+   yang dipilih, exit di **bid real**, fee 2% dari proceeds — tanpa model.
+3. Sweep ulang `per_coin` config + validasi IS/OOS seperti sebelumnya, kali ini
+   hasilnya mencerminkan order book sebenarnya.
